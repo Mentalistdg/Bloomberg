@@ -1,19 +1,30 @@
-"""Métricas relevantes para evaluar un modelo de scoring de fondos.
+"""Métricas de evaluación del poder predictivo del scoring.
 
-Las métricas elegidas responden a la decisión de inversión —
-identificar fondos atractivos vs. poco atractivos — y no a la
-precisión absoluta de la predicción:
+Este módulo calcula las métricas que responden a la pregunta central:
+"¿el score del modelo permite distinguir fondos atractivos de poco
+atractivos?". No se mide precisión absoluta (MAE, RMSE) sino calidad
+del ranking — lo que importa para la decisión de inversión.
 
-  - **Information Coefficient (IC)**: correlación de Spearman por mes
-    entre el score predicho y el retorno realizado a 12m. Métrica
-    estándar en quant equity para medir poder predictivo cross-seccional.
-  - **Spread Q5-Q1**: diferencia de retorno realizado entre el quintil
-    superior e inferior por score. Métrica directa de "valor de la señal":
-    si el modelo dice "este es top-20%", ¿efectivamente performaron
-    mejor que el bottom-20%?
-  - **Hit rate top-quartile**: % de fondos en el top-25% del score que
-    superan la mediana del universo en retorno realizado. Más
-    interpretable para audiencias no-quant.
+Tres métricas complementarias:
+
+  Information Coefficient (IC):
+    Correlación de Spearman por mes entre el score predicho y el retorno
+    realizado a 12m. Métrica estándar en quant equity. Un IC de +0.05
+    ya se considera útil en la industria; IC ~ 0 indica que el modelo
+    no tiene poder predictivo cross-seccional.
+
+  Spread Q5-Q1:
+    Diferencia de retorno realizado promedio entre el quintil superior
+    (Q5, fondos con score más alto) y el inferior (Q1, score más bajo).
+    Responde directamente: "¿los fondos que el modelo recomienda rinden
+    más que los que no?". Un spread positivo indica que sí.
+
+  Hit rate top-quartile:
+    Porcentaje de fondos en el top-25% del score que superan la mediana
+    del universo en retorno realizado. Más interpretable para audiencias
+    no-cuantitativas. Un 50% = azar; >50% = valor agregado.
+
+Usado por: scripts/04_train_and_evaluate.py
 """
 
 from __future__ import annotations

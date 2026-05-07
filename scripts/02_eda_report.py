@@ -1,14 +1,22 @@
-"""02 - Reporte exploratorio (EDA).
+"""Script 02/05 — Reporte exploratorio (EDA) y validación de datos.
 
-Genera los plots clave que sustentan la sección de validación de datos
-del informe entregable. Cada plot se guarda como PNG en artifacts/plots/.
+Genera 5 gráficos diagnósticos que validan la calidad y consistencia
+de los datos antes de pasar a la etapa de modelado. Cada gráfico se
+guarda como PNG en artifacts/plots/ y se referencia en el informe.
+
+Este script es OPCIONAL para el pipeline de modelado (el script 03
+no depende de él), pero es esencial para la documentación y el
+análisis de datos.
 
 Plots producidos:
-  1. cobertura_universo.png       fondos activos por mes (entry/exit)
-  2. evento_pct_dist.png          distribución de evento_pct (no-cero) + yield anual implícito
-  3. fees_dist_y_cobertura.png    distribución de fees + % de fondos con fee reportado por año
-  4. subyacentes_30pct.png        evidencia de regla del 30% (n_instr vs pct_acum)
-  5. retornos_mensuales.png       distribución de retornos mensuales por décadas
+  1. cobertura_universo.png       fondos activos por mes + entradas/salidas
+  2. evento_pct_dist.png          distribución de eventos de capital + yield anual
+  3. fees_dist_y_cobertura.png    distribución de fees + cobertura por año
+  4. subyacentes_30pct.png        verificación de la regla del 30% de AUM
+  5. retornos_mensuales.png       distribución de retornos por década
+
+Input:  usa_fondos_pp.sqlite (directo, no usa panel_raw)
+Output: artifacts/plots/*.png
 
 Uso:
     python -m scripts.02_eda_report

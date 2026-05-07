@@ -1,4 +1,15 @@
-"""Orquestador end-to-end: corre los 5 scripts del pipeline en orden.
+"""Orquestador end-to-end: ejecuta los 5 scripts del pipeline en orden.
+
+Este script importa y ejecuta secuencialmente cada paso del pipeline.
+Si algún paso falla (retorna código != 0), el pipeline se detiene
+inmediatamente.
+
+Orden de ejecución:
+    01_build_features       sqlite → panel mensual base
+    02_eda_report           gráficos diagnósticos de datos
+    03_build_features_full  panel → 17 features + target
+    04_train_and_evaluate   walk-forward CV + métricas + validación
+    05_build_app_data       artefactos → JSONs para dashboard
 
 Uso:
     uv run python -m scripts.run_all

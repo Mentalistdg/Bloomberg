@@ -1,9 +1,23 @@
-"""05 - Bridge resultados → JSONs que consume el backend del dashboard.
+"""Script 05/05 — Transforma artefactos del pipeline en JSONs para el dashboard.
 
-Lee:    artifacts/scores.parquet, metrics.json, drivers_elastic.csv,
-        panel_features.parquet
-Output: app/backend/data/{funds_summary, fund_detail, drivers, backtest,
-        meta}.json
+Este script es el puente entre el pipeline de modelado (scripts 01-04)
+y la aplicación web (FastAPI + React). Toma los artefactos producidos
+por los scripts anteriores y los convierte en JSONs optimizados para
+consumo del frontend.
+
+No realiza ningún cálculo de modelado — solo reestructura datos.
+
+Input:  artifacts/scores.parquet, metrics.json, drivers_elastic.csv,
+        drivers_lgbm.csv, panel_features.parquet
+Output: app/backend/data/
+          funds_summary.json  — ranking de fondos con score y métricas
+          fund_detail.json    — serie temporal mensual por fondo
+          drivers.json        — coeficientes ElasticNet e importancias LightGBM
+          backtest.json       — retorno por quintil por mes (backtest visual)
+          meta.json           — metadata global (fechas, n_fondos, métricas resumen)
+
+Uso:
+    python -m scripts.05_build_app_data
 """
 
 from __future__ import annotations

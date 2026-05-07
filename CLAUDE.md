@@ -2,65 +2,74 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Purpose of this repo
+## Purpose
 
-Sandbox/workspace para preparar la **prueba técnica de Analista de Renta Variable Internacional en AFP Habitat** (usuario: estudiante FEN UChile). No es una librería ni un producto: es un espacio de práctica con acceso real a datos de mercado vía Bloomberg.
+Prueba técnica para **Analista de Renta Variable Internacional — AFP Habitat** (autor: estudiante FEN UChile). Sistema cuantitativo de scoring de fondos mutuos USA: a partir de históricos de precios, eventos de capital, comisiones y concentración, asigna un puntaje que distingue fondos atractivos de poco atractivos.
 
-Artefactos de contexto en la raíz (no son código pero son insumos):
-- `Presentación RVI.pdf` — material de la entrevista / del rol.
-- `usa_fondos_pp (1).zip` — dataset de fondos USA usado para ejercicios.
+Universo de referencia: **renta variable internacional** (MSCI ACWI / World / EM, S&P 500), no renta variable chilena.
 
-Cuando se trabaje en ejercicios de práctica, anclar los ejemplos al universo de **renta variable internacional** (MSCI ACWI / World / EM, S&P 500), no renta variable chilena.
+## Commands
 
-## Toolchain
+```bash
+# Dependencias (Python 3.14, gestionado con uv — nunca usar pip)
+uv sync
 
-- Python **3.14** en `.venv/` administrado por **uv** (`C:\Users\itau_lab\.local\bin\uv`).
-- No hay `pip` dentro del venv — siempre usar `uv` para instalar/sincronizar dependencias.
-- No es un repo git (`git init` no se ha corrido). Si se va a versionar, confirmarlo antes con el usuario.
+# Pipeline completo (5 pasos secuenciales, requiere assets/usa_fondos_pp.sqlite)
+uv run python -m scripts.run_all
 
-### Comandos comunes
+# Pasos individuales
+uv run python -m scripts.01_build_features        # panel mensual base → artifacts/panel_raw.parquet
+uv run python -m scripts.02_eda_report            # plots de validación → artifacts/plots/
+uv run python -m scripts.03_build_features_full   # features + target → artifacts/panel_features.parquet
+uv run python -m scripts.04_train_and_evaluate    # walk-forward + métricas → artifacts/scores.parquet, metrics.json
+uv run python -m scripts.05_build_app_data        # JSONs para dashboard → app/backend/data/
 
-```powershell
-uv sync                      # instala/actualiza deps desde pyproject.toml + uv.lock
-uv add <paquete>             # añade dep al pyproject y la instala
-uv run main.py               # ejecuta script en el venv (recomendado sobre activar)
-.venv\Scripts\python.exe ... # alternativa directa al intérprete del venv
+# Dashboard
+uv run uvicorn app.backend.main:app --reload --port 8000
+npm --prefix app/frontend install && npm --prefix app/frontend run dev   # http://localhost:3000
+
+# Notebook
+uv run jupyter notebook notebooks/informe.ipynb
 ```
 
-## Bloomberg / blpapi
+## Architecture
 
-`blpapi` está instalado vía el índice oficial de Bloomberg, declarado en `pyproject.toml`:
+### Data flow
 
-```toml
-[[tool.uv.index]]
-name = "bloomberg"
-url = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
-explicit = true
-
-[tool.uv.sources]
-blpapi = { index = "bloomberg" }
+```
+assets/usa_fondos_pp.sqlite
+    → 01_build_features → artifacts/panel_raw.parquet
+                              → 02_eda_report → artifacts/plots/
+    → 03_build_features_full → artifacts/panel_features.parquet
+    → 04_train_and_evaluate  → artifacts/scores.parquet + metrics.json + drivers CSVs
+    → 05_build_app_data      → app/backend/data/*.json → FastAPI → React
 ```
 
-**Hechos importantes para no perder tiempo depurando:**
-- El wheel de `blpapi >=3.26` trae `blpapi3_64.dll` embebida. **No** hace falta `BLPAPI_ROOT` ni añadir `C:\blp\DAPI` al `PATH`.
-- Para correr cualquier código que use `blpapi`, la **Bloomberg Terminal debe estar abierta y logueada** y `bbcomm.exe` corriendo (escucha `localhost:8194`). Esto es Desktop API (DAPI), no server-side.
-- Cuotas DAPI: ~5.000 securities únicos/día y ~500k hits/mes por terminal — campos como `EQY_DVD_HIST` cuentan mucho más que `PX_LAST`.
-- Datos sujetos a las habilitaciones del usuario; campos no autorizados devuelven `NOT_AUTHORIZED` aunque se vean en la Terminal.
-- Al importar `blpapi` en Python 3.14 aparecen `SyntaxWarning: invalid escape sequence` desde `resolutionlist.py` y `topiclist.py`. **Son cosméticos**, ignorar.
-- `Element.append("field", "value")` es válido en runtime aunque PyCharm marque "Expected `Name`, got `str`" — el stub es estricto, blpapi convierte internamente.
+Each script reads artifacts from the previous step and writes to `artifacts/`. The pipeline is strictly sequential and stateless — reproducible end-to-end from `run_all.py`.
 
-`main.py` actualmente contiene un test de conexión mínimo contra `//blp/refdata` (sirve como smoke test: si corre y devuelve precios de IBM/AAPL, todo está OK).
+### `src/` modules
 
-## Servicios Bloomberg disponibles
+- **`data.py`** — SQLite loading, daily total return (NAV + capital events), monthly panel construction, fee/concentration attachment via forward-fill
+- **`features.py`** — Feature engineering. Two groups: CORE (momentum 1/3/6/12m, vol, max drawdown, Sharpe — dense after 12m warmup) and EXTENDED (fee, log_n_instrumentos — sparse, imputed with cross-sectional median + `*_disponible` binary flag). Cross-sectional ranks on 6 features. Target: percentile of 12m forward compounded return. Exports `FEATURE_COLS`, `get_modeling_frame()`
+- **`splits.py`** — Walk-forward expanding window with 12-month embargo between train end and val start (anti-leakage for 12m forward target)
+- **`model.py`** — `ElasticNetModel` (primary, interpretable), `LightGBMModel` (non-linear sanity check), `benchmark_naive_score()` (ret_12m_rank − fee_rank, no training)
+- **`metrics.py`** — IC (Spearman per date), quintile spread Q5-Q1, hit rate top-quartile
+- **`validation.py`** — Bootstrap CI of mean IC, Diebold-Mariano test
+- **`paths.py`** — Centralized paths: `PROJECT_ROOT`, `DB_PATH`, `ARTIFACTS_DIR`, `PLOTS_DIR`, `APP_DATA_DIR`
 
-- `//blp/refdata` — `ReferenceDataRequest` (snapshot, eq. BDP), `HistoricalDataRequest` (eq. BDH), `IntradayBarRequest`, `IntradayTickRequest`.
-- `//blp/mktdata` — suscripciones tiempo real.
-- `//blp/instruments` — búsqueda de tickers / ISIN / CUSIP.
-- `//blp/apiflds` — metadata de campos.
-- `//blp/exrsvc` — datos en bloque (eq. BDS, ej. holders, dividendos históricos).
+### Dashboard
 
-## Convenciones de trabajo en este repo
+- **Backend** (`app/backend/main.py`): FastAPI serving pre-computed JSONs from `app/backend/data/`. No online inference. Endpoints: `/api/meta`, `/api/funds`, `/api/funds/{fondo}`, `/api/drivers`, `/api/backtest`, `/api/health`
+- **Frontend** (`app/frontend/`): React 18 + TypeScript + Vite + Tailwind + Recharts. Vite proxies `/api` to `localhost:8000`. Pages: Overview, Detail, Drivers, Backtest
 
-- Cuando una tarea pueda usar datos reales de mercado, preferir **Bloomberg vía `blpapi`** sobre `yfinance`/CSV — la Terminal está disponible y los datos son los "buenos".
-- Usar `yfinance` solo como fallback si la Terminal no está corriendo o como ejemplo reproducible para alguien sin BBG.
-- Para ejercicios de portafolio, mantener código **claro y didáctico** (es contexto de prueba técnica), no sobre-abstraer.
+### Dataset
+
+`assets/usa_fondos_pp.sqlite` (~80 MB, **not in repo** — gitignored). Three tables:
+- `historico` — fecha, securities (→ fondo), precio (NAV), evento_pct
+- `fees` — fecha, fondo, fee (89% NULL in raw)
+- `subyacentes` — fecha, nemo_fondo (→ fondo), pct_acum, n_instrumentos
+
+## Conventions
+
+- Code should be **clear and didactic** (prueba técnica context), not over-abstracted.
+- Anti-leakage discipline: all features use only backward-looking information. Target is the only forward-looking element, protected by 12-month embargo in walk-forward splits.

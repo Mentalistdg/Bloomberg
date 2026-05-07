@@ -1,11 +1,23 @@
-"""Carga del dataset y construcción del retorno total diario y panel mensual.
+"""Módulo de carga de datos y construcción del panel mensual base.
+
+Este módulo es el punto de entrada de datos del pipeline. Se encarga de:
+  1. Conectar a la base sqlite y cargar las 3 tablas crudas (historico,
+     fees, subyacentes).
+  2. Calcular el retorno total diario por fondo, combinando variación
+     de NAV y eventos de capital (distribuciones, dividendos).
+  3. Construir un total return index (TRI) y agregarlo a frecuencia
+     mensual (panel fondo x fin-de-mes).
+  4. Adjuntar fees y datos de concentración al panel mensual.
 
 El retorno total que recibe el inversionista incluye dos componentes:
-- el retorno por variación de NAV: precio_t / precio_{t-1} - 1
-- el retorno por distribución / evento de capital: evento_pct_t
-
-La fórmula correcta usada en todo el pipeline es:
     ret_total_t = (precio_t / precio_{t-1} - 1) + evento_pct_t
+                   ─────────────────────────────   ─────────────
+                   variación de NAV                distribución de capital
+
+El output de este módulo (panel mensual) es el input para la
+ingeniería de features en features.py.
+
+Usado por: scripts/01_build_features.py
 """
 
 from __future__ import annotations
@@ -90,12 +102,18 @@ def compute_daily_total_return(historico: pd.DataFrame) -> pd.DataFrame:
     df = historico.copy()
     df = df.sort_values(["fondo", "fecha"]).reset_index(drop=True)
 
+    # Paso 1: winsorizar eventos de capital al percentil 99.5 para controlar
+    # outliers extremos (ej. reorganizaciones corporativas, devoluciones de capital)
     cap = df["evento_pct"].replace(0, np.nan).abs().quantile(0.995)
     df["evento_pct_w"] = df["evento_pct"].clip(lower=-cap, upper=cap)
 
+    # Paso 2: retorno por variación de precio (NAV day-over-day)
     df["ret_precio"] = df.groupby("fondo")["precio"].pct_change()
+
+    # Paso 3: retorno total = variación de precio + evento de capital
     df["ret_total"] = df["ret_precio"].fillna(0) + df["evento_pct_w"].fillna(0)
 
+    # Paso 4: la primera observación de cada fondo no tiene retorno calculable
     df.loc[df.groupby("fondo").head(1).index, "ret_total"] = np.nan
     return df[["fecha", "fondo", "precio", "evento_pct", "evento_pct_w", "ret_precio", "ret_total"]]
 
@@ -112,6 +130,34 @@ def build_total_return_index(daily: pd.DataFrame) -> pd.DataFrame:
     return df[["fecha", "fondo", "tri"]]
 
 
+def compute_intramonth_features(daily: pd.DataFrame) -> pd.DataFrame:
+    """Calcula features derivadas de datos diarios dentro de cada mes.
+
+    Para cada fondo y mes calcula:
+      - vol_intrames: desviación estándar de ret_total dentro del mes
+        (mín 2 obs, sino NaN). Captura volatilidad de alta frecuencia
+        perdida al agregar a mensual.
+      - autocorr_diaria: autocorrelación lag-1 de ret_total dentro del mes
+        (mín 5 obs). Señal de momentum/reversión intra-mes.
+      - ratio_dias_cero: fracción de días con |ret_total| < 0.0001.
+        Proxy de liquidez — fondos con muchos días "planos" pueden tener
+        pricing stale o baja actividad.
+    """
+    df = daily.dropna(subset=["ret_total"]).copy()
+    df["mes"] = df["fecha"].dt.to_period("M").dt.to_timestamp("M")
+
+    def _agg(g):
+        r = g["ret_total"]
+        n = len(r)
+        vol = r.std() if n >= 2 else np.nan
+        ac = r.autocorr(lag=1) if n >= 5 else np.nan
+        cero = (r.abs() < 0.0001).mean()
+        return pd.Series({"vol_intrames": vol, "autocorr_diaria": ac, "ratio_dias_cero": cero})
+
+    result = df.groupby(["fondo", "mes"]).apply(_agg, include_groups=False).reset_index()
+    return result
+
+
 def build_monthly_panel(daily: pd.DataFrame) -> pd.DataFrame:
     """Construye panel mensual fondo × fin-de-mes.
 
@@ -119,15 +165,21 @@ def build_monthly_panel(daily: pd.DataFrame) -> pd.DataFrame:
       - tri_eom: total return index al cierre del mes
       - ret_mensual: retorno total del mes (compuesto desde ret_total diario)
       - n_dias_obs: cantidad de días con observación en el mes
+      - vol_intrames, autocorr_diaria, ratio_dias_cero: features intra-mes
     """
+    # Paso 1: construir TRI diario y asignar cada fecha a su mes
     tri = build_total_return_index(daily)
     tri["mes"] = tri["fecha"].dt.to_period("M").dt.to_timestamp("M")
 
+    # Paso 2: para cada fondo y mes, tomar el TRI del último día hábil
+    # (fin de mes efectivo) — esto da el "precio de cierre mensual"
     eom = tri.sort_values("fecha").groupby(["fondo", "mes"]).tail(1)
     eom = eom.rename(columns={"tri": "tri_eom"})[["fondo", "mes", "tri_eom"]]
 
+    # Paso 3: retorno mensual = variación del TRI entre fin de mes actual y anterior
     eom["ret_mensual"] = eom.groupby("fondo")["tri_eom"].pct_change()
 
+    # Paso 4: contar días con observación por mes (medida de liquidez/cobertura)
     n_obs = (
         daily.dropna(subset=["ret_total"])
         .assign(mes=lambda x: x["fecha"].dt.to_period("M").dt.to_timestamp("M"))
@@ -137,6 +189,11 @@ def build_monthly_panel(daily: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     panel = eom.merge(n_obs, on=["fondo", "mes"], how="left")
+
+    # Paso 5: features intra-mes derivadas de datos diarios
+    intra = compute_intramonth_features(daily)
+    panel = panel.merge(intra, on=["fondo", "mes"], how="left")
+
     panel = panel.sort_values(["fondo", "mes"]).reset_index(drop=True)
     return panel
 

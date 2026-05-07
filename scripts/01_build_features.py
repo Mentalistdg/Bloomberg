@@ -1,14 +1,24 @@
-"""01 - Construye el panel base mensual del universo de fondos.
+"""Script 01/05 — Construye el panel mensual base desde la base sqlite.
 
+Este es el primer paso del pipeline. Carga las tres tablas crudas de la
+base de datos (historico, fees, subyacentes), calcula el retorno total
+diario incluyendo eventos de capital, y produce un panel mensual
+fondo x fin-de-mes que sirve como input para los siguientes scripts.
+
+Input:  usa_fondos_pp.sqlite (tablas: historico, fees, subyacentes)
 Output: artifacts/panel_raw.parquet
-    panel mensual fondo x fin-de-mes con
-    [tri_eom, ret_mensual, n_dias_obs, fee, pct_acum, n_instrumentos]
+        Columnas: fondo, mes, tri_eom, ret_mensual, n_dias_obs,
+                  fee, pct_acum, n_instrumentos
 
-Próximo paso (02): agregar features lagueadas (returns trailing,
-volatilidad, ranks cross-seccionales, etc.) sobre este panel.
+Siguiente paso: script 02 (EDA) o script 03 (feature engineering).
 
 Uso:
     python -m scripts.01_build_features
+
+Funciones utilizadas de src/:
+    src.data  →  load_historico, load_fees, load_subyacentes,
+                 compute_daily_total_return, build_monthly_panel,
+                 attach_fees_monthly, attach_subyacentes
 """
 
 from __future__ import annotations

@@ -20,8 +20,7 @@ notebooks/.ipynb_checkpoints/
 .claude/
 
 # Datos sensibles del caso (no distribuir)
-usa_fondos_pp.sqlite
-usa_fondos_pp*.zip
+assets/usa_fondos_pp.sqlite
 *Presentaci*n*RVI*.pdf
 
 # Build outputs (frontend)

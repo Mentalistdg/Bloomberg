@@ -1,16 +1,37 @@
-"""Entrenamiento de los modelos de scoring.
+"""Definición y entrenamiento de los modelos de scoring.
 
-Dos modelos comparados:
-    - ElasticNet (con CV interna para alpha y l1_ratio): modelo
-      explicativo y principal, coeficientes interpretables como
-      "drivers del score".
-    - LightGBM regressor: sanity check no-lineal. Si supera al lineal
-      en IC out-of-sample por un margen claro hay no-linealidad o
-      interacciones que el lineal no captura; en caso contrario la
-      simplicidad e interpretabilidad del lineal pesa más.
+Este módulo define los tres modelos que se comparan en el pipeline.
+Cada modelo expone un método fit_predict que recibe datos de train
+y validación, y devuelve predicciones + metadata (coeficientes,
+importancias, hiperparámetros seleccionados).
 
-Ambos se entrenan dentro de cada fold del walk-forward y predicen
-sobre el set de validación correspondiente.
+Modelos:
+
+    ElasticNet (PRINCIPAL):
+        Regresión lineal regularizada con penalización L1+L2. Se usa
+        ElasticNetCV que internamente hace 5-fold CV para seleccionar
+        los mejores alpha (fuerza de regularización) y l1_ratio (balance
+        entre L1 y L2). Las features se estandarizan antes de entrenar
+        para que los coeficientes sean comparables entre sí — estos
+        coeficientes son los "drivers" del score que se presentan al
+        comité de inversión.
+
+    LightGBM (SANITY CHECK):
+        Gradient boosting no-lineal. Si supera al ElasticNet en IC
+        out-of-sample, indicaría que hay interacciones o no-linealidades
+        que el modelo lineal no captura. En la práctica no lo supera,
+        validando la elección del modelo lineal.
+
+    Benchmark naive (LÍNEA BASE):
+        score = ret_12m_rank - fee_rank. Sin entrenamiento. Captura
+        dos heurísticas básicas: momentum (retorno reciente alto es
+        bueno) y fee bajo. Sirve para evaluar si los modelos ML agregan
+        valor sobre la intuición más simple posible.
+
+Los tres se entrenan y evalúan en cada fold del walk-forward
+(ver splits.py), de modo que toda la evaluación es out-of-sample.
+
+Usado por: scripts/04_train_and_evaluate.py
 """
 
 from __future__ import annotations
@@ -32,9 +53,13 @@ class ElasticNetModel:
     random_state: int = 42
 
     def fit_predict(self, X_train, y_train, X_val):
+        """Entrena ElasticNet con CV interna y predice sobre validación."""
+        # Estandarizar features (media=0, std=1) — fit solo sobre train
         scaler = StandardScaler()
         Xt = scaler.fit_transform(X_train)
-        Xv = scaler.transform(X_val)
+        Xv = scaler.transform(X_val)  # aplica misma transformación a val
+        # ElasticNetCV selecciona automáticamente alpha y l1_ratio óptimos
+        # usando 5-fold CV interno dentro del set de train
         model = ElasticNetCV(
             alphas=list(self.alphas),
             l1_ratio=list(self.l1_ratios),
@@ -45,10 +70,11 @@ class ElasticNetModel:
         )
         model.fit(Xt, y_train)
         preds = model.predict(Xv)
+        # Devolver predicciones + metadata para diagnóstico
         return preds, dict(
-            alpha=float(model.alpha_),
-            l1_ratio=float(model.l1_ratio_),
-            coefs=dict(zip(X_train.columns, model.coef_.tolist())),
+            alpha=float(model.alpha_),           # regularización seleccionada
+            l1_ratio=float(model.l1_ratio_),     # balance L1/L2 seleccionado
+            coefs=dict(zip(X_train.columns, model.coef_.tolist())),  # "drivers"
             intercept=float(model.intercept_),
             scaler_mean=scaler.mean_.tolist(),
             scaler_scale=scaler.scale_.tolist(),
@@ -67,14 +93,16 @@ class LightGBMModel:
     random_state: int = 42
 
     def fit_predict(self, X_train, y_train, X_val):
+        """Entrena LightGBM y predice sobre validación.
+        Hiperparámetros fijos (conservadores) — no se tunan por fold."""
         model = lgb.LGBMRegressor(
             n_estimators=self.n_estimators,
             learning_rate=self.learning_rate,
             max_depth=self.max_depth,
             num_leaves=self.num_leaves,
             min_child_samples=self.min_child_samples,
-            subsample=self.subsample,
-            colsample_bytree=self.colsample_bytree,
+            subsample=self.subsample,           # bagging de filas
+            colsample_bytree=self.colsample_bytree,  # bagging de features
             random_state=self.random_state,
             n_jobs=-1,
             verbose=-1,
