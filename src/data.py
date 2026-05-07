@@ -142,6 +142,9 @@ def compute_intramonth_features(daily: pd.DataFrame) -> pd.DataFrame:
       - ratio_dias_cero: fracción de días con |ret_total| < 0.0001.
         Proxy de liquidez — fondos con muchos días "planos" pueden tener
         pricing stale o baja actividad.
+      - evento_pct_mes: suma de evento_pct (winsorizado) dentro del mes.
+        Captura magnitud de distribuciones de capital y dividendos en
+        el mes. Insumo para construir distribution_yield_12m en features.py.
     """
     df = daily.dropna(subset=["ret_total"]).copy()
     df["mes"] = df["fecha"].dt.to_period("M").dt.to_timestamp("M")
@@ -152,7 +155,13 @@ def compute_intramonth_features(daily: pd.DataFrame) -> pd.DataFrame:
         vol = r.std() if n >= 2 else np.nan
         ac = r.autocorr(lag=1) if n >= 5 else np.nan
         cero = (r.abs() < 0.0001).mean()
-        return pd.Series({"vol_intrames": vol, "autocorr_diaria": ac, "ratio_dias_cero": cero})
+        evt = g["evento_pct_w"].fillna(0).sum()
+        return pd.Series({
+            "vol_intrames": vol,
+            "autocorr_diaria": ac,
+            "ratio_dias_cero": cero,
+            "evento_pct_mes": evt,
+        })
 
     result = df.groupby(["fondo", "mes"]).apply(_agg, include_groups=False).reset_index()
     return result
@@ -199,10 +208,31 @@ def build_monthly_panel(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_fees_monthly(panel: pd.DataFrame, fees: pd.DataFrame) -> pd.DataFrame:
-    """Adjunta el fee vigente al cierre de cada mes por fondo (forward-fill).
+    """Adjunta el fee vigente al cierre de cada mes por fondo.
 
-    Para fondos sin ningún fee reportado se deja NaN — la imputación a
-    nivel cross-seccional se hace en features.py con flag explícita.
+    Particularidad del dataset: la tabla `fees` solo reporta valores a
+    partir de 2024-01-31. Un ffill puro (mirando solo al pasado) deja
+    ~88% del panel mensual en NaN, porque casi toda la historia del
+    universo es pre-2024.
+
+    Mitigación: el fee de un mutual fund USA es estructuralmente estable
+    en el tiempo. Empíricamente en este dataset, dentro del subperíodo
+    donde sí hay múltiples observaciones (2024-2026), la mediana de
+    fondos tiene **un único valor de fee** y la desviación intra-fondo
+    es esencialmente 0. Esto permite imputar hacia atrás dentro del
+    mismo fondo (bfill) bajo el supuesto explícito de fee constante,
+    llevando la cobertura efectiva a ~98%.
+
+    Se preserva la bandera binaria `fee_observado`:
+        - 1 si el fee de ese mes específico venía reportado en el
+          dataset original (período 2024+).
+        - 0 si fue rellenado por ffill o bfill desde otro mes.
+    Esta flag captura indirectamente el efecto de período de reporte
+    y, por extensión, parte del survivorship bias del dataset (los
+    fondos con `fee_observado=1` son los que sobrevivieron hasta 2024).
+
+    Para los ~2 fondos sin NINGÚN reporte de fee se deja NaN; la
+    imputación final por mediana cross-seccional ocurre en features.py.
     """
     fees_sorted = fees.sort_values(["fondo", "fecha"])
     fees_eom = (
@@ -211,7 +241,32 @@ def attach_fees_monthly(panel: pd.DataFrame, fees: pd.DataFrame) -> pd.DataFrame
         .tail(1)[["fondo", "mes", "fee"]]
     )
     p = panel.merge(fees_eom, on=["fondo", "mes"], how="left")
-    p["fee"] = p.groupby("fondo")["fee"].ffill()
+
+    # Flag ANTES de cualquier imputación: 1 si el fee venía reportado
+    # originalmente en este mes específico, 0 si no.
+    p["fee_observado"] = p["fee"].notna().astype(int)
+
+    # Paso 1 — imputación intra-fondo dentro del rango temporal del panel:
+    # ffill + bfill. Justificada por estabilidad estructural del fee
+    # (verificable empíricamente en el subperíodo observado).
+    p["fee"] = p.groupby("fondo")["fee"].transform(lambda s: s.ffill().bfill())
+
+    # Paso 2 — fondos que murieron antes de que empezaran los reportes
+    # de fee (2024-01-31): el panel temporal del fondo y los reportes
+    # de fee no se intersectan, así que el bfill no rescata nada. Bajo el
+    # mismo supuesto de fee estructural, usamos el fee promedio reportado
+    # del fondo (de la tabla `fees` completa) para llenar todo su panel.
+    fondos_sin_fee = p.loc[p["fee"].isna(), "fondo"].unique()
+    if len(fondos_sin_fee) > 0:
+        fee_fondo = (
+            fees.dropna(subset=["fee"])
+            .groupby("fondo")["fee"]
+            .mean()
+            .to_dict()
+        )
+        mask = p["fee"].isna() & p["fondo"].isin(fondos_sin_fee)
+        p.loc[mask, "fee"] = p.loc[mask, "fondo"].map(fee_fondo)
+
     return p
 
 

@@ -30,8 +30,15 @@ from src.features import (
     REDUCED_FEATURES,
     get_modeling_frame,
 )
-from src.metrics import hit_rate_top_quartile, ic_per_date, ic_summary, quintile_spread_per_date
-from src.model import ElasticNetModel, LightGBMModel, benchmark_naive_score
+from src.metrics import (
+    hit_rate_top_quartile,
+    ic_per_date,
+    ic_summary,
+    multi_lens_evaluation,
+    quintile_spread_per_date,
+    rank_persistence,
+)
+from src.model import ElasticNetModel, LightGBMModel, axiomatic_score, benchmark_naive_score
 from src.paths import ARTIFACTS_DIR, PLOTS_DIR
 from src.splits import walk_forward_folds
 from src.validation import bootstrap_mean_ci, diebold_mariano
@@ -84,13 +91,21 @@ def run_walk_forward(df: pd.DataFrame, horizon: int,
 
         en_pred, en_info = elastic.fit_predict(X_tr, y_tr, X_vl)
         lgbm_pred, lgbm_info = lgbm.fit_predict(X_tr, y_tr, X_vl)
-        # Benchmark siempre usa las mismas 2 features (ret_12m_rank, fee_rank)
+        # Benchmark naive: ret_12m_rank - fee_rank
         bench_pred = benchmark_naive_score(val)
+        # Axiomático: combinación lineal de ranks con pesos teóricos (sin entrenar)
+        axio_pred = axiomatic_score(val)
 
-        rows = val[["mes", "fondo", "target_ret", "target_rank"]].copy()
+        # Capturar TODOS los targets disponibles para validación multi-lente
+        target_capture = ["mes", "fondo", "target_ret", "target_rank"]
+        for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
+            if opt in val.columns:
+                target_capture.append(opt)
+        rows = val[target_capture].copy()
         rows["score_elastic"] = en_pred
         rows["score_lgbm"] = lgbm_pred
         rows["score_benchmark"] = bench_pred
+        rows["score_axiomatic"] = axio_pred
         rows["fold"] = fold.fold_id
         preds_rows.append(rows)
 
@@ -182,13 +197,27 @@ def plot_drivers(coefs: pd.DataFrame, suffix: str = "") -> None:
 
 def _prepare_df_for_horizon(df_full: pd.DataFrame, horizon: int) -> pd.DataFrame:
     """Filtra a observaciones modelables y renombra columnas de target
-    a nombres genericos (target_ret, target_rank)."""
-    df = get_modeling_frame(df_full, horizon=horizon)
+    a nombres genericos.
+
+    Convención post-refactor:
+      target_rank   = target_sharpe_rank_{h}m  (target de ENTRENAMIENTO)
+      target_ret    = target_ret_{h}m          (retorno realizado, para
+                                                Q5-Q1 en %, interpretable)
+      target_sharpe = target_sharpe_{h}m       (Sharpe realizado, lente)
+      target_sortino = target_sortino_{h}m     (Sortino realizado, lente)
+      target_max_dd = target_max_dd_{h}m       (Max DD realizado, lente)
+    """
+    df = get_modeling_frame(df_full, horizon=horizon, target="sharpe")
     df = df[df["mes"] >= "2010-01-01"].copy()
-    df = df.rename(columns={
-        f"target_ret_{horizon}m": "target_ret",
-        f"target_rank_{horizon}m": "target_rank",
-    })
+    rename_map = {
+        f"target_sharpe_rank_{horizon}m": "target_rank",   # entrenamiento
+        f"target_ret_{horizon}m": "target_ret",            # interpretable %
+        f"target_sharpe_{horizon}m": "target_sharpe",      # lente: risk-adj
+        f"target_sortino_{horizon}m": "target_sortino",    # lente: downside
+        f"target_max_dd_{horizon}m": "target_max_dd",      # lente: tail
+    }
+    rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
+    df = df.rename(columns=rename_map)
     return df
 
 
@@ -222,9 +251,9 @@ def main() -> None:
             print(f"    predicciones OOS: {len(scores):,} filas, "
                   f"{scores['fold'].nunique()} folds")
 
-            # Evaluar los 3 modelos
+            # Evaluar los 4 modelos (ElasticNet, LightGBM, naive, axiomático)
             results = {}
-            for label in ["elastic", "lgbm", "benchmark"]:
+            for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
                 col = f"score_{label}"
                 ev = evaluate_signal(scores, col)
                 results[label] = ev
@@ -257,6 +286,37 @@ def main() -> None:
             dm = diebold_mariano(losses_en, losses_bm, h=horizon)
             print(f"    DM(elastic vs bench): stat={dm['stat']:+.3f}  p={dm['p_value']:.4f}")
             results["diebold_mariano_elastic_vs_benchmark"] = dm
+
+            # Diebold-Mariano: ElasticNet vs Axiomático (compara ML vs teoría)
+            losses_ax = -ic_per_date(scores, "score_axiomatic", "target_rank")
+            dm_ax = diebold_mariano(losses_en, losses_ax, h=horizon)
+            print(f"    DM(elastic vs axio):  stat={dm_ax['stat']:+.3f}  p={dm_ax['p_value']:.4f}")
+            results["diebold_mariano_elastic_vs_axiomatic"] = dm_ax
+
+            # Validación multi-lente: cada scoreador vs varios targets forward
+            multi_lens_targets = [c for c in
+                                  ["target_ret", "target_sharpe", "target_sortino", "target_max_dd"]
+                                  if c in scores.columns]
+            multi_lens = {}
+            for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
+                multi_lens[label] = multi_lens_evaluation(
+                    scores, f"score_{label}", multi_lens_targets,
+                )
+                # Persistencia de rank del scoreador (turnover implícito)
+                pers = rank_persistence(scores, f"score_{label}", lag=horizon)
+                multi_lens[label]["_rank_persistence_lag_h"] = pers
+            results["multi_lens"] = multi_lens
+            if is_full and horizon == 12:
+                # Print resumen ejecutivo de multi-lens (solo full + 12m)
+                print("    --- Multi-lens (Q5-Q1 spread medio sobre target realizado):")
+                for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
+                    parts = []
+                    for tcol in multi_lens_targets:
+                        ml = multi_lens[label].get(tcol, {})
+                        if "q5_minus_q1_mean" in ml:
+                            v = ml["q5_minus_q1_mean"]
+                            parts.append(f"{tcol[7:]}={v:+.3f}")
+                    print(f"      {label:>10s}  " + "  ".join(parts))
 
             # Drivers
             plot_drivers(coefs, suffix=tag)

@@ -16,7 +16,7 @@ export interface Fund {
   sharpe_12m: number | null;
   max_dd_12m: number | null;
   fee: number | null;
-  fee_disponible: number | null;
+  fee_observado: number | null;
   n_instrumentos: number | null;
 }
 

@@ -1,0 +1,20 @@
+{
+  "fecha_max_dataset": "2026-05-01",
+  "n_fondos_total": 277,
+  "n_vivos_al_final": 243,
+  "n_cerrados_antes": 34,
+  "pct_vivos": 87.72563176895306,
+  "pct_cerrados": 12.274368231046932,
+  "cobertura_anios_vivos_mean": 19.473093292547237,
+  "cobertura_anios_vivos_median": 20.227241615331966,
+  "cobertura_anios_cerrados_mean": 3.8439425051334704,
+  "cobertura_anios_cerrados_median": 0.1861738535249829,
+  "cerrados_por_anio": {
+    "2020": 1,
+    "2021": 1,
+    "2023": 28,
+    "2024": 1,
+    "2025": 2,
+    "2026": 1
+  }
+}

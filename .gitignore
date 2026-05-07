@@ -21,6 +21,8 @@ notebooks/.ipynb_checkpoints/
 
 # Datos sensibles del caso (no distribuir)
 assets/usa_fondos_pp.sqlite
+usa_fondos_pp.sqlite
+usa_fondos_pp*.zip
 *Presentaci*n*RVI*.pdf
 
 # Build outputs (frontend)

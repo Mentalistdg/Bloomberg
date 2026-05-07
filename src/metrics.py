@@ -97,3 +97,102 @@ def hit_rate_top_quartile(df: pd.DataFrame, score_col: str, target_col: str,
             continue
         out[d] = float((top[target_col] > med).mean())
     return pd.Series(out, name="hit_rate_top25").sort_index()
+
+
+# --- validación multi-lente -------------------------------------------------
+
+def long_short_information_ratio(spread_series: pd.Series,
+                                  periods_per_year: int = 12) -> dict:
+    """Information Ratio del long-short Q5-Q1.
+
+    Es el Sharpe de la estrategia "comprar el top-quintil del score y vender
+    el bottom-quintil". Captura si la señal del modelo se traduce en una
+    estrategia rentable de manera estable, no solo episódica.
+
+    IR = mean(spread) / std(spread) * sqrt(periods_per_year)
+
+    Métrica estándar en gestión activa de portafolios. IR > 0.5 anualizado
+    se considera bueno; > 1 excelente (raro fuera de muestra).
+    """
+    s = pd.to_numeric(spread_series, errors="coerce").dropna()
+    if len(s) < 2 or s.std() == 0:
+        return dict(ir=np.nan, mean=np.nan, std=np.nan, n=int(len(s)))
+    mean = float(s.mean())
+    std = float(s.std())
+    ir = (mean / std) * np.sqrt(periods_per_year)
+    return dict(ir=float(ir), mean=mean, std=std, n=int(len(s)))
+
+
+def rank_persistence(scores_df: pd.DataFrame, score_col: str, lag: int = 12,
+                     date_col: str = "mes", fund_col: str = "fondo") -> dict:
+    """Persistencia del rank predicho por el modelo: correlación entre el
+    rank que el modelo asignó a un fondo en T y el rank que le asignó en
+    T+lag (default 12 meses).
+
+    Si la persistencia es alta, el modelo recomienda los mismos fondos
+    consistentemente — lo que es deseable para una decisión de selección
+    a largo plazo (turnover bajo, costos de transacción bajos). Si es
+    baja, el modelo cambia mucho de opinión y la estrategia implicaría
+    rotación frecuente.
+
+    Devuelve correlación de Spearman pooled sobre todos los pares
+    (fondo, T) — (mismo fondo, T+lag) disponibles.
+    """
+    df = scores_df[[date_col, fund_col, score_col]].copy()
+    df["rank_t"] = df.groupby(date_col)[score_col].rank(pct=True, method="average")
+    df = df.sort_values([fund_col, date_col])
+    df["rank_t_plus_lag"] = df.groupby(fund_col)["rank_t"].shift(-lag)
+    paired = df.dropna(subset=["rank_t", "rank_t_plus_lag"])
+    if len(paired) < 50:
+        return dict(persistence=np.nan, n_pairs=int(len(paired)))
+    rho, _ = stats.spearmanr(paired["rank_t"], paired["rank_t_plus_lag"])
+    return dict(persistence=float(rho), n_pairs=int(len(paired)))
+
+
+def multi_lens_evaluation(scores_df: pd.DataFrame, score_col: str,
+                           target_cols: list[str],
+                           date_col: str = "mes") -> dict:
+    """Evalúa el mismo score contra MÚLTIPLES targets forward. Cada target
+    es una "lente": una pregunta financiera distinta.
+
+    Por cada target reporta:
+      - IC mensual promedio (correlación rank-rank)
+      - IC IR (mean/std del IC mensual)
+      - Q5-Q1 spread promedio del target realizado
+      - Long-Short IR (Sharpe del spread Q5-Q1)
+      - Hit rate top-25%
+
+    La idea: un score robusto debería discriminar bien en VARIAS lentes,
+    no solo en la métrica con la que fue entrenado. Un score que solo
+    funciona en su métrica de entrenamiento es sospechoso de overfitting
+    a la definición de target.
+
+    Parameters
+    ----------
+    target_cols : list of str
+        Nombres de columnas de target en scores_df. Pueden ser nivel
+        ("target_ret_12m") o rank ("target_rank_12m") — la función no
+        distingue, solo usa Spearman para IC y agrupa para spread.
+    """
+    out = {}
+    for tcol in target_cols:
+        if tcol not in scores_df.columns:
+            out[tcol] = dict(error=f"columna {tcol!r} no presente")
+            continue
+        ic = ic_per_date(scores_df, score_col, tcol, date_col=date_col)
+        ic_stats = ic_summary(ic)
+        spread = quintile_spread_per_date(scores_df, score_col, tcol, date_col=date_col)
+        ls_ir = (long_short_information_ratio(spread["spread"])
+                 if "spread" in spread.columns and len(spread) > 0
+                 else dict(ir=np.nan, n=0))
+        hit = hit_rate_top_quartile(scores_df, score_col, tcol, date_col=date_col)
+        out[tcol] = {
+            "ic_mean": ic_stats["mean"],
+            "ic_ir": ic_stats["ic_ir"],
+            "ic_hit": ic_stats["hit"],
+            "q5_minus_q1_mean": float(spread["spread"].mean()) if len(spread) > 0 else np.nan,
+            "long_short_ir": ls_ir["ir"],
+            "hit_rate_top25": float(hit.mean()) if len(hit) > 0 else np.nan,
+            "n_months": int(len(ic.dropna())),
+        }
+    return out

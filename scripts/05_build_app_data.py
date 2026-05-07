@@ -74,7 +74,7 @@ def main() -> None:
             "max_dd_12m": (None if p is None or pd.isna(p.get("max_dd_12m"))
                            else float(p["max_dd_12m"])),
             "fee": (None if p is None or pd.isna(p.get("fee")) else float(p["fee"])),
-            "fee_disponible": (None if p is None else int(p.get("fee_disponible", 0))),
+            "fee_observado": (None if p is None else int(p.get("fee_observado", 0))),
             "n_instrumentos": (None if p is None or pd.isna(p.get("n_instrumentos"))
                                else int(p["n_instrumentos"])),
         })
@@ -171,11 +171,16 @@ def main() -> None:
                 "spread_q5_q1": metrics[label]["spread_q5_q1_mean"],
                 "hit_top25": metrics[label]["hit_rate_top25_mean"],
             }
-            for label in ["elastic", "lgbm", "benchmark"]
+            for label in ["elastic", "lgbm", "benchmark", "axiomatic"]
+            if label in metrics
         },
         "diebold_mariano_elastic_vs_benchmark": metrics.get(
             "diebold_mariano_elastic_vs_benchmark"),
+        "diebold_mariano_elastic_vs_axiomatic": metrics.get(
+            "diebold_mariano_elastic_vs_axiomatic"),
         "primary_model": "elastic",
+        "training_target": "target_sharpe_rank_12m",
+        "scorers_compared": ["elastic", "lgbm", "benchmark", "axiomatic"],
     }
     with open(APP_DATA_DIR / "meta.json", "w") as f:
         json.dump(meta, f, indent=2, default=str)

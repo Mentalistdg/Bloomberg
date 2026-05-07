@@ -3,126 +3,220 @@
 > Caso técnico Analista de Inversiones, Renta Variable Indirecta. Documento
 > resumen. El análisis técnico completo, con código y outputs, está en
 > `notebooks/informe.ipynb`. La defensa visual está en `slides.pdf`.
+> Documentación expandida de supuestos y limitaciones en `README.md`.
 
-## Definición del problema
+## 1. Definición del problema
 
-**Variable a predecir:** percentil cross-seccional del retorno total a 12
-meses forward, dentro del universo activo en cada fecha. Esta elección:
+**Variable a predecir:** **percentil cross-seccional del Sharpe ratio
+forward 12m** (`target_sharpe_rank_12m`). Para cada (fondo, mes T) se
+calcula el Sharpe anualizado de los retornos mensuales de T+1 a T+12 y
+se rankea cross-seccionalmente entre los fondos del universo activo en T.
 
-- Hace al target robusto a regímenes de mercado (es ranking, no nivel).
-- Captura la unidad de decisión del comité (ranking entre fondos en una
-  fecha dada).
-- Usa retorno total (incluye eventos de capital), por lo que mide
-  rentabilidad efectiva del inversionista.
+**Por qué Sharpe forward y no retorno forward:**
 
-**Enfoque elegido: explicativo > predictivo.** El modelo principal es un
-ElasticNet (lineal regularizado, coeficientes interpretables como drivers
-del score). Como sanity check no-lineal se entrena en paralelo un LightGBM.
-Razones del enfoque:
+- Combina simultáneamente "retorno alto" + "riesgo bajo" en una métrica
+  única, sin debate sobre pesos relativos.
+- Es la unidad de calidad que un comité de inversiones de AFP entiende
+  por defecto — métrica universal de la industria.
+- Una AFP no maximiza retorno bruto; selecciona fondos para sostener
+  afiliados a largo plazo, donde la consistencia (Sharpe alto) importa
+  más que un retorno excepcional volátil.
 
-1. La audiencia del modelo (comité de inversiones) entiende factores; la
-   interpretabilidad del lineal pesa más que un eventual ajuste marginal
-   de un black-box.
-2. El tamaño efectivo del problema (~250 fondos × 120 meses) limita la
-   capacidad útil de modelos flexibles.
-3. La literatura (Carhart 1997, Berk-Green 2004, Fama-French 2010) reporta
-   que la persistencia de retornos netos de fondos mutuos es marginal — la
-   posición prudente es modelar con humildad estadística.
+El retorno forward simple (`target_ret_12m`) se mantiene como métrica
+reportada en paralelo (no de entrenamiento) para discusión interpretable
+del Q5-Q1 spread en %.
 
-## Construcción de features
+**Enfoque elegido: explicativo con validación predictiva.** El modelo
+principal es ElasticNet (lineal regularizado, coeficientes interpretables
+como drivers del score). En paralelo:
 
-Separadas en dos grupos por densidad:
+- **LightGBM** como sanity check de no-linealidad — si supera al lineal,
+  hay interacciones que el lineal no captura.
+- **AxiomaticScorer** — fórmula con pesos teóricos derivados de teoría
+  financiera de selección de fondos (sin entrenar). Permite contrastar
+  "lo que el modelo aprende empíricamente" contra "lo que se sabe
+  estructuralmente".
+- **Benchmark naive** — `ret_12m_rank − fee_rank`, línea base mínima
+  contra la que cualquier modelo debe ganar.
 
-- **CORE** (no-NaN obligatorio): `ret_1m`, `ret_3m`, `ret_6m`, `ret_12m`,
-  `vol_12m`, `max_dd_12m`, `sharpe_12m`. Densas tras un warmup de 12 meses.
-- **EXTENDED** (sparse, imputadas con flag): `fee`, `log_n_instrumentos` —
-  más una flag binaria `*_disponible` que captura el efecto de información
-  faltante.
+Tradeoff aceptado: priorizamos defensibilidad y transparencia sobre
+máxima performance OOS.
 
-Adicionalmente se agregan **rank features cross-seccionales** sobre
-`ret_3m`, `ret_12m`, `vol_12m`, `sharpe_12m`, `fee`, `log_n_instrumentos`
-para robustez a regímenes y reducción de escala-sensibilidad.
+## 2. Construcción de features
 
-**Anti-leakage:** todas las features se computan al cierre de cada mes
-usando exclusivamente información histórica (rolling windows hacia atrás).
-El target — único elemento del sistema que mira hacia adelante — se
-construye con `prod(1+ret_{t+1..t+12})-1`. Walk-forward CV con embargo de
-12 meses entre fin de train e inicio de val asegura que no se solapen las
-ventanas de target entre folds.
+**31 features totales** divididas en tres grupos:
 
-## Validación e interpretación de resultados
+**CORE (14)** — derivadas de retornos diarios y mensuales, no-NaN
+obligatorio para que la observación sea modelable:
 
-Walk-forward expanding window con 9 folds, cubriendo 2016-2024 fuera de
-muestra. Métricas en cada fold y agregadas:
+| Feature | Intuición |
+|---|---|
+| `ret_1m`, `ret_3m`, `ret_6m`, `ret_12m` | Momentum a múltiples horizontes |
+| `vol_12m`, `max_dd_12m`, `sharpe_12m` | Riesgo realizado y risk-adjusted |
+| `vol_intrames`, `autocorr_diaria`, `ratio_dias_cero` | Microestructura intra-mes y proxy de iliquidez |
+| `skewness_12m`, `hit_rate_12m` | Asimetría y consistencia de la distribución de retornos |
+| `distribution_yield_12m` | Yield anual de eventos de capital (estilo income vs growth) |
+| `persistencia_rank_12m` | Estabilidad de la posición relativa del fondo en el universo |
 
-| Modelo | IC mensual (mean) | IC IR | Q5-Q1 spread | CI95 (bootstrap) |
+**EXTENDED (5)** — features estructurales del fondo:
+
+| Feature | Notas |
+|---|---|
+| `fee` | Imputado con ffill+bfill intra-fondo; cobertura 99.3% (ver supuesto #1 abajo) |
+| `log_n_instrumentos`, `pct_acum` | Concentración del portafolio (insumo "primer decil" del enunciado) |
+| `fee_observado` | Flag binaria: 1 si fee venía reportado en ese mes (período 2024+), 0 si imputado |
+| `concentracion_disponible` | Flag binaria de disponibilidad de concentración |
+
+**RANK (12)** — percentiles cross-seccionales dentro del mes para todas
+las features anteriores con señal de nivel/escala. Robustos a cambios de
+régimen.
+
+**Anti-leakage (crítico):** todas las features se computan al cierre del
+mes T usando exclusivamente información de t ≤ T (rolling hacia atrás).
+Los targets — únicos elementos forward del sistema — se construyen con
+`shift(-i)` de `ret_mensual`. Walk-forward CV con embargo de 12 meses
+entre fin de train e inicio de val asegura que no se solapen ventanas
+de target entre folds.
+
+## 3. Modelo y validación
+
+**Walk-forward expanding window**: 9 folds para horizonte 12m, mínimo
+60 meses de training, 12 meses de validación, embargo = 12m.
+
+**Resultados out-of-sample (target Sharpe forward 12m, full features):**
+
+| Modelo | IC mensual | IR | Hit % | CI95 (bootstrap) |
 |---|---|---|---|---|
-| ElasticNet | +0.006 | +0.02 | -0.26% | [-0.063, +0.076] |
-| LightGBM | -0.045 | -0.20 | -1.55% | [-0.088, -0.002] |
-| Benchmark naive | +0.031 | +0.09 | -0.26% | [-0.039, +0.096] |
+| **ElasticNet** (primary) | **+0.190** | **+0.85** | 79.6% | **[+0.147, +0.232]** |
+| LightGBM | +0.150 | +0.59 | 75.9% | [+0.100, +0.199] |
+| AxiomaticScorer | +0.153 | +0.51 | 71.3% | [+0.093, +0.208] |
+| Benchmark naive | +0.117 | +0.50 | 71.3% | [+0.072, +0.160] |
 
-El benchmark naive es una combinación lineal sin entrenamiento de
-`ret_12m_rank − fee_rank`. **El test de Diebold-Mariano entre ElasticNet
-y benchmark arroja p > 0.65: no hay diferencia estadística entre ambos
-signals.** El intervalo bootstrap del IC de ElasticNet incluye al cero —
-no se rechaza la hipótesis nula de ausencia de poder predictivo a niveles
-convencionales.
+**Diebold-Mariano** (con corrección Newey-West, h=12):
 
-Esta es una **conclusión defendible y consistente con la literatura**:
-los retornos post-fee de fondos mutuos exhiben persistencia marginal. El
-modelo es honesto en su humildad estadística.
+- ElasticNet vs benchmark naive: estadístico = −1.68, **p = 0.093**
+  (significativo al 10%, marginal al 5%).
+- ElasticNet vs AxiomaticScorer: p = 0.40 (no significativo — el
+  axiomático ya captura buena parte de la señal con teoría financiera).
 
-## Drivers del score
+**Multi-lente OOS** — el mismo score evaluado contra 4 targets forward
+realizados distintos (Q5-Q1 spread):
 
-Coeficientes ElasticNet promedio entre folds, sobre features estandarizadas:
+| Modelo | Retorno % | Sharpe | Sortino | Max DD |
+|---|---|---|---|---|
+| ElasticNet | −1.3% | **+0.37** | **+0.75** | **+0.04** |
+| AxiomaticScorer | −1.0% | +0.26 | +0.70 | +0.03 |
+| LightGBM | −1.6% | +0.27 | +0.21 | +0.02 |
+| Benchmark naive | +0.5% | +0.19 | −0.26 | +0.02 |
 
-- Positivos: `sharpe_12m`, `ret_12m_rank`, `ret_3m_rank`.
-- Negativos: `max_dd_12m`, `vol_12m_rank`, `log_n_instrumentos_rank`.
+**Lectura:** el ElasticNet entrenado con target Sharpe gana fuertemente
+en lentes risk-adjusted (Sharpe Q5-Q1 +0.37, Sortino +0.75) y reduce
+drawdowns realizados, pero **pierde en retorno bruto** (Q5-Q1 = −1.3%).
+Esto es **comportamiento esperado y consistente con el target elegido**:
+el modelo aprende a identificar fondos de mejor calidad ajustada por
+riesgo, no maximiza retorno absoluto. Para una AFP cuyo mandato es
+sostener afiliados a largo plazo, el tradeoff es deseable.
 
-Los signos coinciden con intuición financiera: alto Sharpe y momentum
-positivo, drawdowns y volatilidad penalizados, fondos más concentrados
-levemente preferidos. La magnitud absoluta es pequeña — coherente con la
-señal débil documentada estadísticamente.
+## 4. Drivers del score (interpretabilidad)
 
-## Limitaciones reconocidas
+Coeficientes ElasticNet promedio entre folds, sobre features estandarizadas
+(positivos = empujan score arriba, negativos = empujan score abajo):
 
-1. **Cobertura de features estructurales.** `subyacentes` (concentración)
-   tiene snapshot reciente para 47% del universo; `fees` arranca en 2015.
-2. **Sesgo de supervivencia.** Fondos discontinuados antes de 2026 no
-   aparecen — cualquier promedio histórico está sesgado al alza.
-3. **Anonimización del universo.** Sin clasificación por estilo, región,
-   asset class no se pueden incorporar features de cobertura.
-4. **Tamaño efectivo del problema.** ~120 meses × 250 fondos limita el
-   alcance de modelos flexibles.
-5. **Horizonte único.** Solo se exploró target a 12 meses; horizontes más
-   cortos (3m, 6m) podrían exhibir distinto poder predictivo.
+- **Positivos (premia el modelo):** `sharpe_12m_rank`, `hit_rate_12m_rank`,
+  `persistencia_rank_12m`, `max_dd_12m_rank`. Coherente con calidad
+  ajustada por riesgo + consistencia + estabilidad.
+- **Negativos (penaliza el modelo):** `vol_12m`, `vol_12m_rank`,
+  `fee_rank`, `pct_acum_rank`, `autocorr_diaria_rank`. Coherente con
+  evitar volatilidad, fees altos, concentración excesiva e iliquidez.
 
-## Extensiones con más tiempo
+Las magnitudes son moderadas — coherentes con la señal documentada
+estadísticamente. Detalle por fold en `artifacts/drivers_elastic.csv`.
 
-- Incorporar features macro y de mercado (régimen de volatilidad, term
-  spread, dollar index) para condicionar el score por régimen.
-- Datos de holdings agregados (style box, exposición sectorial, net flows)
-  como reemplazo del proxy actual de concentración.
-- Backtest con costos realistas, rebalanceo mensual, computar Sharpe de
-  carteras top-quintil neto de turnover.
-- Combinación del score cuantitativo con un proceso de due diligence
-  cualitativa (manager tenure, AUM stability, consistencia operacional)
-  — el output del modelo debe ser un input dentro de un proceso multi-factor.
+## 5. Limitaciones reconocidas
 
-## Uso de IA en el proceso
+1. **Reporte de fee solo desde 2024-01-31.** El dataset reporta fees en
+   ~12% del panel originalmente. Mitigado bajo el supuesto explícito de
+   fee estructural (verificable empíricamente: std intra-fondo ≈ 0 en el
+   subperíodo observado), llevando cobertura a 99.3%. Limitación
+   inevitable de la fuente; ver supuestos en README.md.
 
-Se utilizó Claude (Anthropic) en tres etapas:
+2. **Survivorship bias parcial.** 87.7% de fondos vivos al final del
+   dataset (mayo 2026). Los 34 "muertos" tienen mediana de cobertura de
+   2 meses → sugiere snapshot del universo vigente, no historia con
+   quiebras. El filtro de cobertura mínima ≥36 meses excluye a la mayoría.
+   Plot en `artifacts/plots/survivorship.png`.
 
-1. **Inspección y validación del dataset**, particularmente para
-   reconciliar la descripción del campo de concentración con su firma
-   matemática. Las hipótesis competidoras se testearon con queries SQL
-   y datos reales de mercado vía Bloomberg.
-2. **Code review del esquema de validación walk-forward** para verificar
-   ausencia de leakage temporal en el target a 12 meses.
-3. **Estructuración del informe** y de la defensa de elecciones
-   metodológicas.
+3. **Anonimización del universo.** Sin clasificación por estilo, región
+   o asset class — no se pueden agregar features de "fondo vs benchmark de
+   estilo". Mitigación parcial: features stylistic capturan propiedades
+   correlacionadas con estilo.
 
-Todas las salidas del modelo se ejecutaron contra los datos reales y se
-contrastaron contra literatura citada (Carhart 1997, Berk-Green 2004,
-López de Prado para anti-leakage, Diebold-Mariano 1995 para el test de
-superioridad predictiva).
+4. **Liquidez por proxies indirectos.** No hay variable directa; se usan
+   `autocorr_diaria`, `ratio_dias_cero`, `vol_intrames` derivados de la
+   serie diaria.
+
+5. **Sin información de flujos / AUM.** Imposibilita detectar diseconomies
+   of scale (Berk-Green) y diferenciar fondos chicos vs grandes.
+
+## 6. Extensiones con más tiempo o más datos
+
+- **Datos**: AUM y flujos por fondo; clasificación por estilo/región/
+  benchmark; extender reporte de fee a períodos pre-2024 para validar el
+  supuesto estructural.
+- **Modelado**: features macro y de régimen (term spread, dollar index,
+  VIX) para condicionar el score por contexto de mercado; ensembles
+  ElasticNet+LightGBM con stacking.
+- **Validación**: análisis explícito por subperíodos (bull, COVID, alza
+  tasas) para verificar estabilidad de la señal entre regímenes;
+  backtest con costos realistas y rebalanceo mensual; portafolio
+  construido con turnover constraint.
+- **Proceso**: el output cuantitativo debe ser INPUT de un proceso
+  multi-factor que incluya due diligence cualitativa (manager tenure,
+  ownership stability, gobierno corporativo) — un score solo nunca
+  reemplaza el juicio humano del comité de inversiones.
+
+## 7. Uso de IA / LLMs en el proceso
+
+**Herramientas:** Claude (Anthropic, Opus 4.7).
+
+**Etapas donde se usó:**
+
+1. **Discusión metodológica iterativa** — particularmente para definir
+   la variable objetivo. La conversación inicial proponía retorno forward
+   12m; tras discutir con el modelo qué define a un "fondo bueno" para
+   una AFP (alto retorno + bajo riesgo + bajo fee + diversificado +
+   líquido), se separaron conceptualmente "lo que define al fondo" (target)
+   de "lo que se observa hoy del fondo" (features). Resultado: cambio del
+   target a Sharpe forward 12m, con justificación documentada.
+
+2. **Validación empírica de supuestos** — antes de imputar el fee con
+   `bfill` se consultó al SQLite directamente para verificar que el fee
+   es estructuralmente constante intra-fondo (mediana 1 valor único, std
+   ≈ 0). El supuesto se aceptó solo después de evidencia, no por
+   sugerencia del LLM.
+
+3. **Code review** del esquema de walk-forward, embargo temporal e
+   imputación, para verificar ausencia de leakage.
+
+4. **Generación de docstrings, comentarios y narrativa de informe.**
+
+**Cómo se validó lo que el modelo entregó:**
+
+- Cada cambio de código se ejecutó contra el dataset real y se verificaron
+  los outputs (cobertura, distribuciones, métricas) antes de aceptarlo.
+- Los hallazgos numéricos (cobertura del fee, survivorship, IC del modelo)
+  se reportan tal como salen del pipeline — no se suavizaron.
+- Las decisiones metodológicas se documentaron explícitamente en
+  `README.md` con su tradeoff, no se asumieron implícitamente.
+
+**Ejemplo concreto de prompt útil:** durante la discusión de imputación
+de fee, ante la pregunta "¿se puede imputar fee con el último valor del
+fondo si es esencialmente constante?", el LLM cuestionó la premisa
+solicitando datos antes de implementar. Las queries SQL resultantes
+revelaron que el fee se reporta solo desde 2024 (no era simplemente "11%
+de NaN aleatorio" como se había asumido inicialmente), lo que cambió la
+estrategia de imputación de "mediana cross-seccional" a "ffill+bfill
+intra-fondo bajo supuesto estructural" + flag binaria.
+
+Todos los commits del repo están firmados con
+`Co-Authored-By: Claude Opus 4.7`.

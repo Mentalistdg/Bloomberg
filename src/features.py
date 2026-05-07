@@ -25,10 +25,15 @@ Las 23 features se dividen en tres grupos:
                    sharpe_12m, vol_intrames, autocorr_diaria, ratio_dias_cero.
                    Se exige no-NaN para que una observación sea modelable.
 
-    EXTENDED (4):  fee, log_n_instrumentos + 2 flags binarias (*_disponible).
-                   Cobertura limitada (12% fee, 5% concentración post-ffill).
-                   Se imputan con mediana cross-seccional y se marca con
-                   flag para que el modelo distinga dato real vs imputado.
+    EXTENDED (4):  fee, log_n_instrumentos + 2 flags binarias.
+                   - fee: cobertura ~98% post ffill+bfill intra-fondo
+                     (el dataset solo reporta fees desde 2024-01-31, pero
+                     el fee es estructuralmente estable en mutual funds USA,
+                     por lo que se imputa hacia atrás dentro de cada fondo).
+                     Flag `fee_observado` (set en data.py) marca si el valor
+                     del mes específico era original (1) o imputado (0).
+                   - log_n_instrumentos: cobertura limitada, imputado con
+                     mediana cross-seccional + flag `concentracion_disponible`.
 
     RANK (9):      Percentil cross-seccional dentro del mes para: ret_3m,
                    ret_12m, vol_12m, sharpe_12m, fee, log_n_instrumentos,
@@ -84,15 +89,69 @@ def add_risk_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_stylistic_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Features que capturan propiedades estilísticas de la distribución
+    de retornos y eventos del fondo, complementarias a nivel y volatilidad.
+
+    skewness_12m: asimetría de la distribución de retornos mensuales en
+        los últimos 12 meses. Positiva = cola más larga al alza. Negativa
+        = cola más larga a la baja (típico de fondos con retornos
+        consistentes pequeños interrumpidos por pérdidas grandes).
+    hit_rate_12m: fracción de meses con retorno positivo en los últimos
+        12 meses. Mide consistencia (no nivel) — un fondo puede tener
+        hit rate alto con retornos chicos o hit rate bajo con retornos
+        grandes ocasionales.
+    distribution_yield_12m: suma de eventos de capital
+        (evento_pct_mes, ya winsorizada en data.py) en los últimos
+        12 meses. Captura el "yield" anual de distribuciones del fondo
+        (dividendos, capital gains distributions). Es señal de estilo
+        income/value (alta) vs growth/total-return (baja, ~0).
+    """
+    g = df.groupby("fondo", group_keys=False)["ret_mensual"]
+    df["skewness_12m"] = g.apply(lambda s: s.rolling(12, min_periods=12).skew())
+    df["hit_rate_12m"] = g.apply(
+        lambda s: s.rolling(12, min_periods=12).apply(lambda x: (x > 0).mean(), raw=True)
+    )
+    df["distribution_yield_12m"] = (
+        df.groupby("fondo", group_keys=False)["evento_pct_mes"]
+        .apply(lambda s: s.fillna(0).rolling(12, min_periods=12).sum())
+    )
+    return df
+
+
+def add_persistence_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Estabilidad del rank del fondo: cuán similar es su posición
+    relativa al universo hoy comparado con 12 meses atrás.
+
+    persistencia_rank_12m = 1 - |sharpe_12m_rank_t - sharpe_12m_rank_{t-12}|
+
+    Vale ~1 si el fondo mantiene su posición (top sigue top, o bottom
+    sigue bottom). Vale ~0 si saltó entre extremos. Información
+    incremental sobre el nivel del rank: un fondo puede estar siempre
+    arriba o saltar entre rankings altos y bajos — son cualitativamente
+    distintos. Esta función debe ejecutarse DESPUÉS de
+    add_cross_sectional_ranks para que sharpe_12m_rank exista.
+    """
+    rank_lagged = df.groupby("fondo")["sharpe_12m_rank"].shift(12)
+    df["persistencia_rank_12m"] = 1 - (df["sharpe_12m_rank"] - rank_lagged).abs()
+    return df
+
+
 # --- features estructurales ----------------------------------------------
 
 def add_extended_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Prepara features de fee y concentración. Antes de imputar, se crean
-    flags binarias (0/1) que marcan si el dato original estaba disponible,
-    para que el modelo pueda distinguir dato real de imputado."""
-    # Flag: 1 si el fondo tiene fee reportado, 0 si será imputado
-    df["fee_disponible"] = df["fee"].notna().astype(int)
-    # Flag: 1 si el fondo tiene dato de concentración, 0 si será imputado
+    """Prepara features de concentración y log-transform de n_instrumentos.
+
+    La flag `fee_observado` ya viene seteada desde data.attach_fees_monthly
+    (1 = valor original del mes, 0 = imputado por ffill/bfill intra-fondo),
+    por lo que no se recalcula acá.
+
+    Para concentración se crea `concentracion_disponible` que distingue
+    fondo con dato de concentración disponible (vía ffill) de fondos sin
+    ningún reporte. La concentración SÍ varía en el tiempo (es snapshot del
+    portafolio en una fecha), por lo que NO se aplica bfill — solo ffill
+    desde el último reporte conocido.
+    """
     df["concentracion_disponible"] = df["n_instrumentos"].notna().astype(int)
     # Log-transform para reducir asimetría de n_instrumentos
     df["log_n_instrumentos"] = np.log1p(df["n_instrumentos"])
@@ -100,10 +159,17 @@ def add_extended_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def impute_extended(df: pd.DataFrame) -> pd.DataFrame:
-    """Imputa fee y log_n_instrumentos con la mediana cross-seccional
-    del universo activo en cada mes. La flag `*_disponible` ya captura
-    el efecto de información faltante."""
-    for col in ["fee", "log_n_instrumentos"]:
+    """Imputa fee, log_n_instrumentos y pct_acum con la mediana
+    cross-seccional del universo activo en cada mes. Las flags
+    `fee_observado` y `concentracion_disponible` ya capturan el efecto
+    de información faltante para que el modelo distinga dato real de
+    imputado.
+
+    Para `fee` la imputación cross-seccional solo aplica a los ~2 fondos
+    sin ningún reporte (la imputación intra-fondo ffill+bfill ya cubrió
+    el resto en data.attach_fees_monthly).
+    """
+    for col in ["fee", "log_n_instrumentos", "pct_acum"]:
         med = df.groupby("mes")[col].transform("median")
         df[col] = df[col].fillna(med)
         # fallback final: mediana global
@@ -114,8 +180,10 @@ def impute_extended(df: pd.DataFrame) -> pd.DataFrame:
 # --- ranks cross-seccionales ---------------------------------------------
 
 RANK_COLS = [
-    "ret_3m", "ret_12m", "vol_12m", "sharpe_12m", "fee", "log_n_instrumentos",
+    "ret_3m", "ret_12m", "vol_12m", "sharpe_12m", "max_dd_12m",
+    "fee", "log_n_instrumentos", "pct_acum",
     "vol_intrames", "autocorr_diaria", "ratio_dias_cero",
+    "skewness_12m", "hit_rate_12m",
 ]
 
 
@@ -131,22 +199,75 @@ def add_cross_sectional_ranks(df: pd.DataFrame) -> pd.DataFrame:
 # --- target ---------------------------------------------------------------
 
 def add_target(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
-    """Retorno total compuesto a `horizon` meses forward y su percentil
-    cross-seccional dentro de los fondos con target observable en ese mes.
+    """Targets forward para entrenar y validar el scoreador.
 
-    Genera columnas: target_ret_{horizon}m y target_rank_{horizon}m.
+    Construye dos métricas forward (mira `horizon` meses hacia adelante) y
+    los rankings cross-seccionales correspondientes. Ambas métricas se
+    calculan sobre la misma ventana de retornos forward (T+1 a T+horizon).
+
+    Targets generados:
+      - target_ret_{h}m / target_rank_{h}m:
+            Retorno total compuesto a `horizon` meses y su percentil
+            dentro del mes T. Métrica naive — captura ganancia bruta sin
+            ajustar por riesgo. Se mantiene para reportar resultados en
+            términos interpretables (Q5-Q1 spread en %), pero NO es el
+            target de entrenamiento principal.
+      - target_sharpe_{h}m / target_sharpe_rank_{h}m:
+            Sharpe ratio anualizado a `horizon` meses
+            ((mean / std) * sqrt(12)) y su percentil dentro del mes T.
+            Captura simultáneamente retorno y riesgo en una métrica
+            única; es el TARGET PRINCIPAL DE ENTRENAMIENTO porque
+            corresponde mejor a la pregunta de selección de fondos en una
+            AFP (calidad ajustada por riesgo, no retorno bruto). Requiere
+            los `horizon` retornos forward presentes; si faltan, NaN.
     """
     fwd = pd.concat(
         [df.groupby("fondo")["ret_mensual"].shift(-i) for i in range(1, horizon + 1)],
         axis=1,
     )
-    # Retorno compuesto forward: prod(1 + r_{t+1..t+h}) - 1
+
+    # --- Target 1: Retorno forward compuesto (interpretable, métrica reportada)
     # min_count=horizon asegura NaN si faltan meses (fondo no sobrevive h meses)
     df[f"target_ret_{horizon}m"] = (1 + fwd).prod(axis=1, min_count=horizon) - 1
-    # Percentil cross-seccional del target dentro de cada mes
     df[f"target_rank_{horizon}m"] = df.groupby("mes")[f"target_ret_{horizon}m"].rank(
         pct=True, method="average"
     )
+
+    # --- Target 2: Sharpe forward anualizado (target de entrenamiento)
+    # Solo se calcula cuando los `horizon` retornos forward están todos
+    # presentes — un fondo que no sobrevive el horizonte completo NO tiene
+    # Sharpe forward observable.
+    n_valid = fwd.notna().sum(axis=1)
+    all_present = n_valid == horizon
+    mean_fwd = fwd.mean(axis=1)
+    std_fwd = fwd.std(axis=1)
+    sharpe = (mean_fwd / std_fwd) * np.sqrt(12)
+    sharpe = sharpe.replace([np.inf, -np.inf], np.nan).where(all_present, np.nan)
+    df[f"target_sharpe_{horizon}m"] = sharpe
+    df[f"target_sharpe_rank_{horizon}m"] = df.groupby("mes")[f"target_sharpe_{horizon}m"].rank(
+        pct=True, method="average"
+    )
+
+    # --- Target 3: Sortino forward (lente de validación, no entrenamiento)
+    # Como Sharpe pero penaliza solo volatilidad a la baja. Más robusto
+    # ante asimetría — premia fondos que ganan asimétricamente arriba.
+    downside_std_fwd = fwd.where(fwd < 0).std(axis=1)
+    sortino = (mean_fwd / downside_std_fwd) * np.sqrt(12)
+    sortino = sortino.replace([np.inf, -np.inf], np.nan).where(all_present, np.nan)
+    df[f"target_sortino_{horizon}m"] = sortino
+
+    # --- Target 4: Max drawdown forward (lente de validación)
+    # Peor caída pico-valle dentro del horizonte. Mide riesgo de cola
+    # realizado. Captura "qué tan mal momento tuvo el fondo en el período"
+    # más allá de la volatilidad promedio.
+    def _fwd_max_dd(row):
+        if row.isna().any():
+            return np.nan
+        cum = (1 + row).cumprod()
+        return float((cum / cum.cummax() - 1).min())
+
+    df[f"target_max_dd_{horizon}m"] = fwd.apply(_fwd_max_dd, axis=1)
+
     return df
 
 
@@ -156,10 +277,12 @@ CORE_FEATURES = [
     "ret_1m", "ret_3m", "ret_6m", "ret_12m",
     "vol_12m", "max_dd_12m", "sharpe_12m",
     "vol_intrames", "autocorr_diaria", "ratio_dias_cero",
+    "skewness_12m", "hit_rate_12m", "distribution_yield_12m",
+    "persistencia_rank_12m",
 ]
 EXTENDED_FEATURES = [
-    "fee", "log_n_instrumentos",
-    "fee_disponible", "concentracion_disponible",
+    "fee", "log_n_instrumentos", "pct_acum",
+    "fee_observado", "concentracion_disponible",
 ]
 RANK_FEATURES = [f"{c}_rank" for c in RANK_COLS]
 FEATURE_COLS = CORE_FEATURES + EXTENDED_FEATURES + RANK_FEATURES
@@ -191,18 +314,64 @@ def build_features(panel: pd.DataFrame, horizons: list[int] | None = None) -> pd
     df = panel.copy().sort_values(["fondo", "mes"]).reset_index(drop=True)
     df = add_return_features(df)          # ret_1m, ret_3m, ret_6m, ret_12m
     df = add_risk_features(df)            # vol_12m, max_dd_12m, sharpe_12m
-    df = add_extended_features(df)        # fee_disponible, concentracion_disponible, log_n_instrumentos
+    df = add_stylistic_features(df)       # skewness_12m, hit_rate_12m
+    df = add_extended_features(df)        # concentracion_disponible, log_n_instrumentos (fee_observado viene de data.py)
     df = impute_extended(df)              # rellenar NaN con mediana cross-seccional
-    df = add_cross_sectional_ranks(df)    # 9 features *_rank (percentil dentro del mes)
+    df = add_cross_sectional_ranks(df)    # *_rank (percentil dentro del mes) sobre RANK_COLS
+    df = add_persistence_features(df)     # persistencia_rank_12m (depende de sharpe_12m_rank)
     for h in horizons:
-        df = add_target(df, horizon=h)    # target_ret_{h}m y target_rank_{h}m
+        df = add_target(df, horizon=h)    # target_ret_{h}m, target_rank_{h}m, target_sharpe_{h}m, target_sharpe_rank_{h}m
     return df
 
 
-def get_modeling_frame(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
-    """Filtra el panel a observaciones modelables: target observado para
-    el horizonte indicado y todas las features CORE no-NaN. Las features
-    EXTENDED ya están imputadas en build_features."""
-    target_col = f"target_rank_{horizon}m"
+MIN_FUND_MONTHS = 36
+
+
+def get_modeling_frame(
+    df: pd.DataFrame,
+    horizon: int = 12,
+    target: str = "sharpe",
+    min_fund_months: int = MIN_FUND_MONTHS,
+) -> pd.DataFrame:
+    """Filtra el panel a observaciones modelables.
+
+    Aplica tres filtros en orden:
+      1. Cobertura mínima del fondo: solo se modelan fondos con al menos
+         `min_fund_months` meses de historia en el panel (default 36).
+         Justificación: con menos de 3 años no hay evidencia suficiente
+         para evaluar al fondo (después del warmup de 12m + horizonte
+         forward de 12m, quedarían <12 obs entrenables del fondo).
+      2. Target del horizonte indicado no-NaN.
+      3. Todas las features CORE no-NaN.
+
+    Las features EXTENDED ya están imputadas en build_features.
+
+    Parameters
+    ----------
+    horizon : int
+        Horizonte forward del target en meses (default 12).
+    target : {"sharpe", "ret"}
+        Cuál columna usar como target principal del entrenamiento:
+        - "sharpe" (default, recomendado): target_sharpe_rank_{h}m.
+          Premia retorno ajustado por riesgo. Alineado con la decisión
+          de selección de fondos en una AFP.
+        - "ret": target_rank_{h}m (retorno forward simple). Mantiene
+          compatibilidad con la versión anterior del pipeline.
+    min_fund_months : int
+        Mínimo de meses de historia requeridos por fondo para incluirlo
+        (default 36).
+    """
+    if target == "sharpe":
+        target_col = f"target_sharpe_rank_{horizon}m"
+    elif target == "ret":
+        target_col = f"target_rank_{horizon}m"
+    else:
+        raise ValueError(f"target debe ser 'sharpe' o 'ret', no {target!r}")
+
+    # Filtro de cobertura mínima por fondo
+    n_meses_por_fondo = df.groupby("fondo")["mes"].count()
+    fondos_validos = n_meses_por_fondo[n_meses_por_fondo >= min_fund_months].index
+    df = df[df["fondo"].isin(fondos_validos)]
+
     mask = df[target_col].notna() & df[CORE_FEATURES].notna().all(axis=1)
     return df.loc[mask].copy()

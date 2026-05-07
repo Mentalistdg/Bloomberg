@@ -123,3 +123,57 @@ def benchmark_naive_score(X_val_df: pd.DataFrame) -> np.ndarray:
     fee_rank = X_val_df.get("fee_rank", pd.Series(0.5, index=X_val_df.index))
     mom_rank = X_val_df.get("ret_12m_rank", pd.Series(0.5, index=X_val_df.index))
     return (mom_rank - fee_rank).values
+
+
+# Pesos del score axiomático. Definidos a partir de teoría financiera de
+# selección de fondos, NO entrenados — esa es la razón de ser del scoreador
+# (transparente y defendible al comité). Los pesos suman 1.00 en valor
+# absoluto; signos elegidos según la dirección esperada de cada feature.
+AXIOMATIC_WEIGHTS = {
+    # +: alto Sharpe pasado = mejor calidad esperada (persistencia
+    # estructural del manager + estilo del fondo)
+    "sharpe_12m_rank":     +0.30,
+    # -: fee alto = costo garantizado, deduce retorno mes a mes
+    # (Carhart 1997: predictor más estable de underperformance)
+    "fee_rank":            -0.20,
+    # +: max_dd_12m es valor NEGATIVO; rank alto = drawdown menos profundo
+    # = menor riesgo de cola = mejor
+    "max_dd_12m_rank":     +0.20,
+    # -: alta concentración = mayor riesgo idiosincrático no diversificado
+    # (literal: insumo "concentración del primer decil" del enunciado)
+    "pct_acum_rank":       -0.15,
+    # -: alta autocorr diaria = subyacentes ilíquidos / pricing stale =
+    # mayor costo de salida y opacidad
+    "autocorr_diaria_rank": -0.15,
+}
+
+
+def axiomatic_score(X_val_df: pd.DataFrame) -> np.ndarray:
+    """Score axiomático sin entrenamiento. Combinación lineal de ranks
+    cross-seccionales (todos en [0, 1]) con pesos derivados de teoría
+    financiera de selección de fondos.
+
+    A diferencia de ElasticNet/LightGBM (donde el modelo aprende los
+    pesos de los datos), acá los pesos están fijados a priori. Esto es
+    una decisión metodológica deliberada — el axiomático representa
+    "así define un analista cuantitativo a un fondo bueno", y permite
+    contrastar lo que se aprende empíricamente con lo que se sabe
+    estructuralmente.
+
+    Si el axiomático bate al ML, hay sospechas de overfitting o de mala
+    elección de target. Si el ML bate al axiomático, el modelo está
+    capturando interacciones o pesos no triviales que la teoría no
+    anticipa. Ambos resultados son informativos.
+
+    Pesos en `AXIOMATIC_WEIGHTS` (suman 1.00 en valor absoluto).
+    """
+    score = pd.Series(0.0, index=X_val_df.index)
+    for feature, weight in AXIOMATIC_WEIGHTS.items():
+        if feature in X_val_df.columns:
+            score = score + weight * X_val_df[feature]
+        else:
+            raise KeyError(
+                f"Feature {feature!r} requerida por axiomatic_score no está "
+                f"en el DataFrame. Verificar que esté en RANK_COLS."
+            )
+    return score.values
