@@ -1,0 +1,30 @@
+[project]
+name = "bloomberg"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "blpapi>=3.24",
+    "pandas>=3.0.2",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "statsmodels>=0.14",
+    "lightgbm>=4.5",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "pyarrow>=17",
+    "jupyter>=1.1",
+    "jupytext>=1.16",
+    "ipykernel>=6.29",
+    "fastapi>=0.136.1",
+    "uvicorn>=0.46.0",
+    "httpx>=0.28.1",
+]
+
+[[tool.uv.index]]
+name = "bloomberg"
+url = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
+explicit = true
+
+[tool.uv.sources]
+blpapi = { index = "bloomberg" }

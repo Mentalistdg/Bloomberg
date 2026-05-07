@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# IDE / herramientas locales
+.idea/
+.vscode/
+.claude/
+
+# Datos sensibles del caso (no distribuir)
+usa_fondos_pp.sqlite
+usa_fondos_pp*.zip
+*Presentaci*n*RVI*.pdf
+
+# Build outputs (frontend)
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

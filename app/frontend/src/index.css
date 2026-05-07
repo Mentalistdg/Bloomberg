@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  table { @apply w-full text-sm; }
+  th { @apply text-left px-3 py-2 font-medium text-muted border-b border-line; }
+  td { @apply px-3 py-2 border-b border-line/40; }
+  tr:hover td { @apply bg-panel/60; }
+}
