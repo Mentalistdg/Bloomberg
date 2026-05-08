@@ -45,12 +45,18 @@ def main() -> None:
         metrics = json.load(f)
 
     # ---- 1. funds_summary.json
-    # Para cada fondo, su última observación con score, decil y
-    # estadísticas históricas.
-    last_score = scores.sort_values("mes").groupby("fondo").tail(1)
-    last_score["decil"] = last_score.groupby("mes")[SCORE_COL].transform(
-        lambda s: pd.qcut(s.rank(method="first"), 10, labels=False, duplicates="drop") + 1
-    )
+    # Solo fondos del último mes de scoring para tener un corte
+    # cross-seccional consistente (mismo período para todos).
+    # Fondos scorados en meses anteriores (por salir del walk-forward)
+    # no son comparables con el ranking actual.
+    latest_month = scores["mes"].max()
+    last_score = scores[scores["mes"] == latest_month].copy()
+    print(f"    filtro: solo fondos de {latest_month.date()} "
+          f"({len(last_score)} de {scores['fondo'].nunique()} totales)")
+    last_score["decil"] = pd.qcut(
+        last_score[SCORE_COL].rank(method="first"),
+        10, labels=False, duplicates="drop",
+    ) + 1
 
     last_panel = panel.sort_values("mes").groupby("fondo").tail(1).set_index("fondo")
 

@@ -4,14 +4,18 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Paleta sobria institucional para finanzas
-        ink: '#0b0f17',
-        panel: '#111827',
-        muted: '#9ca3af',
-        line: '#1f2937',
-        accent: '#2563eb',     // azul institucional
-        positive: '#10b981',
-        negative: '#ef4444',
+        ink: '#000000',
+        panel: '#111111',
+        'panel-hover': '#1a1a1a',
+        muted: '#737373',
+        line: '#222222',
+        'line-light': '#333333',
+        accent: '#CF2141',
+        'accent-light': '#e8274a',
+        'accent-dark': '#a81a34',
+        positive: '#00c853',
+        negative: '#CF2141',
+        text: '#f5f5f5',
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

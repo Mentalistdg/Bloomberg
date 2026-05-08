@@ -60,7 +60,15 @@ def load_historico() -> pd.DataFrame:
 
 
 def load_fees() -> pd.DataFrame:
-    """Carga la tabla fees y agrupa duplicados (mismo fondo+fecha)."""
+    """Carga la tabla fees y agrupa duplicados (mismo fondo+fecha).
+
+    Se descartan registros con fee == 0: en el dataset, las entradas con
+    fee exactamente 0 corresponden a un artefacto de carga del último
+    snapshot (2026-04-09) donde 9 fondos que previamente tenían fees
+    no-cero (0.15–0.46%) aparecen con 0. Tratar estos ceros como NaN
+    permite que el ffill/bfill en attach_fees_monthly propague el último
+    fee válido conocido.
+    """
     with open_db() as con:
         df = pd.read_sql(
             "SELECT fecha, fondo, fee FROM fees",
@@ -69,6 +77,7 @@ def load_fees() -> pd.DataFrame:
         )
     df = (
         df.dropna(subset=["fee"])
+        .query("fee > 0")
         .groupby(["fondo", "fecha"], as_index=False)["fee"]
         .mean()
         .sort_values(["fondo", "fecha"])
@@ -95,23 +104,26 @@ def compute_daily_total_return(historico: pd.DataFrame) -> pd.DataFrame:
     ret_precio_t = precio_t / precio_{t-1} - 1
     ret_total_t  = ret_precio_t + evento_pct_t
 
-    El evento_pct se winsoriza al p99.5 para neutralizar outliers de
-    eventos de capital extremos (devolución de capital, reorganizaciones)
-    que distorsionan la serie.
+    El ret_total se winsoriza al p99.5 para neutralizar outliers extremos.
+    Se winsoriza el retorno TOTAL (no solo el evento_pct) porque en eventos
+    de split/reverse-split el precio cae fuertemente y el evento_pct
+    compensa — winsorizar solo el evento destruye la cancelación natural
+    y genera drawdowns ficticios de 70-80%.
     """
     df = historico.copy()
     df = df.sort_values(["fondo", "fecha"]).reset_index(drop=True)
 
-    # Paso 1: winsorizar eventos de capital al percentil 99.5 para controlar
-    # outliers extremos (ej. reorganizaciones corporativas, devoluciones de capital)
-    cap = df["evento_pct"].replace(0, np.nan).abs().quantile(0.995)
-    df["evento_pct_w"] = df["evento_pct"].clip(lower=-cap, upper=cap)
-
-    # Paso 2: retorno por variación de precio (NAV day-over-day)
+    # Paso 1: retorno por variación de precio (NAV day-over-day)
     df["ret_precio"] = df.groupby("fondo")["precio"].pct_change()
 
-    # Paso 3: retorno total = variación de precio + evento de capital
-    df["ret_total"] = df["ret_precio"].fillna(0) + df["evento_pct_w"].fillna(0)
+    # Paso 2: retorno total crudo = variación de precio + evento de capital
+    df["evento_pct_w"] = df["evento_pct"]  # mantener columna por compat
+    df["ret_total_raw"] = df["ret_precio"].fillna(0) + df["evento_pct"].fillna(0)
+
+    # Paso 3: winsorizar el retorno TOTAL al p99.5 para controlar outliers
+    # genuinos sin destruir la cancelación precio/evento en splits
+    cap = df["ret_total_raw"].replace(0, np.nan).abs().quantile(0.995)
+    df["ret_total"] = df["ret_total_raw"].clip(lower=-cap, upper=cap)
 
     # Paso 4: la primera observación de cada fondo no tiene retorno calculable
     df.loc[df.groupby("fondo").head(1).index, "ret_total"] = np.nan
