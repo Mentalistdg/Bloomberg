@@ -93,9 +93,17 @@ def main() -> None:
     # Fondos scorados en meses anteriores (por salir del walk-forward)
     # no son comparables con el ranking actual.
     latest_month = scores["mes"].max()
-    last_score = scores[scores["mes"] == latest_month].copy()
-    print(f"    filtro: solo fondos de {latest_month.date()} "
-          f"({len(last_score)} de {scores['fondo'].nunique()} totales)")
+    # Para el overview, usar el último mes con target realizado (OOS validado)
+    # en vez del mes de producción donde target_ret_12m es NaN (futuro).
+    has_target = scores.dropna(subset=["target_ret_12m"])
+    if len(has_target) > 0:
+        overview_month = has_target["mes"].max()
+    else:
+        overview_month = latest_month
+    last_score = scores[scores["mes"] == overview_month].copy()
+    print(f"    filtro: overview_month={overview_month.date()} "
+          f"(latest={latest_month.date()}, "
+          f"{len(last_score)} de {scores['fondo'].nunique()} totales)")
     last_score["decil"] = pd.qcut(
         last_score[SCORE_COL].rank(method="first"),
         10, labels=False, duplicates="drop",
@@ -272,7 +280,7 @@ def main() -> None:
 
     # ---- 5. meta.json — info global
     meta = {
-        "as_of": str(scores["mes"].max().date()),
+        "as_of": str(overview_month.date()),
         "n_funds": int(scores["fondo"].nunique()),
         "n_months": int(scores["mes"].nunique()),
         "n_folds": int(scores["fold"].nunique()),
