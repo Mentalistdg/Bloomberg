@@ -332,6 +332,7 @@ def get_modeling_frame(
     horizon: int = 12,
     target: str = "sharpe",
     min_fund_months: int = MIN_FUND_MONTHS,
+    require_target: bool = True,
 ) -> pd.DataFrame:
     """Filtra el panel a observaciones modelables.
 
@@ -341,7 +342,7 @@ def get_modeling_frame(
          Justificación: con menos de 3 años no hay evidencia suficiente
          para evaluar al fondo (después del warmup de 12m + horizonte
          forward de 12m, quedarían <12 obs entrenables del fondo).
-      2. Target del horizonte indicado no-NaN.
+      2. Target del horizonte indicado no-NaN (si require_target=True).
       3. Todas las features CORE no-NaN.
 
     Las features EXTENDED ya están imputadas en build_features.
@@ -360,6 +361,10 @@ def get_modeling_frame(
     min_fund_months : int
         Mínimo de meses de historia requeridos por fondo para incluirlo
         (default 36).
+    require_target : bool
+        Si True (default), filtra filas donde el target sea NaN. Si False,
+        permite filas sin target (útil para scoring extendido donde las
+        features backward-looking existen pero el target forward no).
     """
     if target == "sharpe":
         target_col = f"target_sharpe_rank_{horizon}m"
@@ -373,5 +378,8 @@ def get_modeling_frame(
     fondos_validos = n_meses_por_fondo[n_meses_por_fondo >= min_fund_months].index
     df = df[df["fondo"].isin(fondos_validos)]
 
-    mask = df[target_col].notna() & df[CORE_FEATURES].notna().all(axis=1)
+    if require_target:
+        mask = df[target_col].notna() & df[CORE_FEATURES].notna().all(axis=1)
+    else:
+        mask = df[CORE_FEATURES].notna().all(axis=1)
     return df.loc[mask].copy()

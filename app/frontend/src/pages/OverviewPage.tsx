@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Download, Info } from 'lucide-react';
+import { Download, Info, ChevronRight } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Fund, Meta, getFunds, getMeta } from '../services/api';
 import LoadingScreen from '../components/LoadingScreen';
@@ -199,13 +199,9 @@ export default function OverviewPage() {
             {meta.n_funds} fondos &middot; corte {meta.as_of} &middot; validado con datos hasta dic 2025 &middot; modelo: {meta.primary_model}
           </p>
         )}
-        <div className="flex items-start gap-2 mt-3 px-3 py-2.5 rounded-lg bg-panel border border-line text-xs text-muted leading-relaxed max-w-3xl">
-          <Info size={14} className="mt-0.5 shrink-0 text-accent" />
-          <span>
-            Los scores corresponden al &uacute;ltimo mes donde el modelo pudo ser validado
-            out-of-sample (requiere 12 meses de datos forward). La columna
-            &laquo;Realizado 12m&raquo; muestra el retorno que efectivamente ocurri&oacute;.
-          </span>
+        <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded-lg bg-panel border border-line text-xs text-muted max-w-4xl">
+          <Info size={14} className="shrink-0 text-accent" />
+          <span>Scores del &uacute;ltimo corte validado out-of-sample &middot; &laquo;Realizado 12m&raquo; = retorno efectivo post-score.</span>
         </div>
       </div>
 
@@ -309,8 +305,9 @@ export default function OverviewPage() {
                     if (col.key === 'fondo') {
                       return (
                         <td key={col.key} className={`sticky-col ${groupBorder(i)}`}>
-                          <Link to={`/detail/${f.fondo}`} className="text-accent font-medium hover:underline">
+                          <Link to={`/detail/${f.fondo}`} className="text-accent font-medium hover:underline inline-flex items-center gap-1">
                             {f.fondo}
+                            <ChevronRight size={12} className="opacity-40" />
                           </Link>
                         </td>
                       );

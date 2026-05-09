@@ -195,7 +195,8 @@ def plot_drivers(coefs: pd.DataFrame, suffix: str = "") -> None:
     plt.close(fig)
 
 
-def _prepare_df_for_horizon(df_full: pd.DataFrame, horizon: int) -> pd.DataFrame:
+def _prepare_df_for_horizon(df_full: pd.DataFrame, horizon: int,
+                            require_target: bool = True) -> pd.DataFrame:
     """Filtra a observaciones modelables y renombra columnas de target
     a nombres genericos.
 
@@ -207,7 +208,8 @@ def _prepare_df_for_horizon(df_full: pd.DataFrame, horizon: int) -> pd.DataFrame
       target_sortino = target_sortino_{h}m     (Sortino realizado, lente)
       target_max_dd = target_max_dd_{h}m       (Max DD realizado, lente)
     """
-    df = get_modeling_frame(df_full, horizon=horizon, target="sharpe")
+    df = get_modeling_frame(df_full, horizon=horizon, target="sharpe",
+                            require_target=require_target)
     df = df[df["mes"] >= "2010-01-01"].copy()
     rename_map = {
         f"target_sharpe_rank_{horizon}m": "target_rank",   # entrenamiento
@@ -333,6 +335,87 @@ def main() -> None:
 
             # Backward-compat: archivos sin sufijo = 12m full
             if horizon == 12 and is_full:
+                # --- Scoring de producción (post walk-forward) ---
+                last_val_end = diag["val_end"].max()
+                prod_mask = df["mes"] > pd.Timestamp(last_val_end)
+                prod_data = df.loc[prod_mask]
+
+                if len(prod_data) > 0:
+                    print(f"\n    --- PRODUCCION: {prod_data['mes'].nunique()} meses "
+                          f"post walk-forward ({prod_data['mes'].min().date()} -> "
+                          f"{prod_data['mes'].max().date()})")
+
+                    # Entrenar con TODOS los datos hasta last_val_end
+                    train_all = df.loc[df["mes"] <= pd.Timestamp(last_val_end)]
+                    X_tr = train_all[feat_cols]
+                    y_tr = train_all["target_rank"].values
+                    X_prod = prod_data[feat_cols]
+
+                    elastic_prod = ElasticNetModel()
+                    lgbm_prod = LightGBMModel()
+                    en_pred, _ = elastic_prod.fit_predict(X_tr, y_tr, X_prod)
+                    lgbm_pred, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_prod)
+                    bench_pred = benchmark_naive_score(prod_data)
+                    axio_pred = axiomatic_score(prod_data)
+
+                    target_cols = ["mes", "fondo", "target_ret", "target_rank"]
+                    for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
+                        if opt in prod_data.columns:
+                            target_cols.append(opt)
+                    prod_rows = prod_data[target_cols].copy()
+                    prod_rows["score_elastic"] = en_pred
+                    prod_rows["score_lgbm"] = lgbm_pred
+                    prod_rows["score_benchmark"] = bench_pred
+                    prod_rows["score_axiomatic"] = axio_pred
+                    prod_rows["fold"] = -1  # marcador: producción, no walk-forward
+
+                    scores = pd.concat([scores, prod_rows], ignore_index=True)
+                    print(f"    producción: {len(prod_rows)} obs agregadas (fold=-1)")
+                else:
+                    # Si no hay datos de producción, entrenar modelos de todas formas
+                    # para scoring extendido
+                    train_all = df.loc[df["mes"] <= df["mes"].max()]
+                    X_tr = train_all[feat_cols]
+                    y_tr = train_all["target_rank"].values
+                    elastic_prod = ElasticNetModel()
+                    lgbm_prod = LightGBMModel()
+                    elastic_prod.fit_predict(X_tr, y_tr, train_all[feat_cols])
+                    lgbm_prod.fit_predict(X_tr, y_tr, train_all[feat_cols])
+
+                # --- Scoring extendido (features sin target) ---
+                # Solo meses posteriores al último mes de producción (evitar
+                # mezclar fold=-1 y fold=-2 en el mismo mes)
+                prod_months = set(scores.loc[scores["fold"] == -1, "mes"].unique()) if len(scores) else set()
+                last_prod = max(prod_months) if prod_months else pd.Timestamp(last_val_end)
+                df_ext = _prepare_df_for_horizon(df_full, horizon,
+                                                 require_target=False)
+                df_ext = df_ext[df_ext["mes"] >= "2010-01-01"]
+                ext_mask = (df_ext["mes"] > last_prod)
+                ext_data = df_ext.loc[ext_mask]
+
+                if len(ext_data) > 0:
+                    X_ext = ext_data[feat_cols]
+                    en_ext, _ = elastic_prod.fit_predict(X_tr, y_tr, X_ext)
+                    lgbm_ext, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_ext)
+                    bench_ext = benchmark_naive_score(ext_data)
+                    axio_ext = axiomatic_score(ext_data)
+
+                    ext_rows = ext_data[["mes", "fondo"]].copy()
+                    ext_rows["target_ret"] = np.nan
+                    ext_rows["target_rank"] = np.nan
+                    for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
+                        if opt in scores.columns:
+                            ext_rows[opt] = np.nan
+                    ext_rows["score_elastic"] = en_ext
+                    ext_rows["score_lgbm"] = lgbm_ext
+                    ext_rows["score_benchmark"] = bench_ext
+                    ext_rows["score_axiomatic"] = axio_ext
+                    ext_rows["fold"] = -2  # marcador: producción extendida
+
+                    scores = pd.concat([scores, ext_rows], ignore_index=True)
+                    print(f"    extendido: {len(ext_rows)} obs "
+                          f"({ext_data['mes'].nunique()} meses, fold=-2)")
+
                 scores_compat = scores.rename(columns={
                     "target_ret": "target_ret_12m",
                     "target_rank": "target_rank",

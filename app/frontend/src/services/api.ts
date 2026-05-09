@@ -35,11 +35,23 @@ export interface Drivers {
 
 export interface BacktestPoint {
   date: string;
-  top_q5: number | null;
-  bot_q1: number | null;
+  top_d10: number | null;
+  bot_d1: number | null;
   universe: number | null;
   spread: number | null;
+  naive_top_d10: number | null;
+  naive_bot_d1: number | null;
+  naive_spread: number | null;
   n_funds: number;
+  is_production: boolean;
+  is_partial: boolean;
+  months_forward: number;
+}
+
+export interface FoldBoundary {
+  fold: number;
+  val_start: string;
+  val_end: string;
 }
 
 export interface Meta {
@@ -47,8 +59,19 @@ export interface Meta {
   n_funds: number;
   n_months: number;
   n_folds: number;
-  metrics_summary: Record<string, any>;
+  metrics_summary: Record<string, {
+    ic_mean: number;
+    ic_ir: number;
+    ic_hit_meses: number;
+    ic_ci95_low: number;
+    ic_ci95_high: number;
+    spread_q5_q1: number;
+    hit_top25: number;
+  }>;
+  diebold_mariano_elastic_vs_benchmark?: { stat: number; p_value: number; n: number };
+  fold_boundaries?: FoldBoundary[];
   primary_model: string;
+  scorers_compared?: string[];
 }
 
 export const getFunds = (params?: { decil?: number; limit?: number }) =>

@@ -30,6 +30,13 @@ app/frontend/node_modules/
 app/frontend/dist/
 app/frontend/.vite/
 
+# Old repo clone (no subir)
+Bloomberg/
+
+# Scripts auxiliares locales
+_diag.py
+_verify.py
+
 # OS
 .DS_Store
 Thumbs.db
