@@ -72,7 +72,10 @@ def quintile_spread_per_date(df: pd.DataFrame, score_col: str, target_col: str,
             q = pd.qcut(g[score_col].rank(method="first"), n_q, labels=False, duplicates="drop")
         except ValueError:
             continue
-        means = g.groupby(q)[target_col].mean()
+        # Reemplazar +inf/-inf por NaN antes de promediar: target_sortino puede
+        # tener +inf (retorno positivo, cero downside dev) que rompe mean() por decil.
+        target_clean = g[target_col].replace([np.inf, -np.inf], np.nan)
+        means = target_clean.groupby(q).mean()
         if len(means) < n_q:
             continue
         row = {date_col: d}
@@ -90,12 +93,13 @@ def hit_rate_top_quartile(df: pd.DataFrame, score_col: str, target_col: str,
     for d, g in df.groupby(date_col):
         if len(g) < 8:
             continue
-        med = g[target_col].median()
+        target_clean = g[target_col].replace([np.inf, -np.inf], np.nan)
+        med = target_clean.median()
         thr = g[score_col].quantile(0.75)
         top = g[g[score_col] >= thr]
         if len(top) == 0:
             continue
-        out[d] = float((top[target_col] > med).mean())
+        out[d] = float((top[target_col].replace([np.inf, -np.inf], np.nan) > med).mean())
     return pd.Series(out, name="hit_rate_top25").sort_index()
 
 

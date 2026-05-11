@@ -8,6 +8,7 @@ Endpoints:
     GET /api/funds/{fondo}        ficha histórica de un fondo
     GET /api/drivers              coeficientes ElasticNet + importance LightGBM
     GET /api/backtest             serie temporal del spread top-Q5 vs bot-Q1
+    GET /api/portfolio            portafolio óptimo D10 con backtest
     GET /api/health               liveness probe
 """
 
@@ -80,3 +81,8 @@ def get_drivers():
 @app.get("/api/backtest")
 def get_backtest():
     return _load("backtest.json")
+
+
+@app.get("/api/portfolio")
+def get_portfolio():
+    return _load("portfolio.json")

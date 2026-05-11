@@ -1,14 +1,13 @@
-"""Script 04/05 — Entrenamiento walk-forward, prediccion y evaluacion multi-horizonte.
+"""Script 04 — Entrenamiento walk-forward y evaluacion (horizonte 6m, target Sortino).
 
-Entrena los modelos (ElasticNet, LightGBM, benchmark naive) usando validacion
-walk-forward con embargo temporal, tanto con el set completo de features (23)
-como con el set reducido (5 features curadas). Compara horizontes y feature sets.
+Entrena ElasticNet (primario), LightGBM (sanity check) y benchmark naive
+usando validacion walk-forward rolling window (10 años) con embargo de
+6 meses. El target de entrenamiento es target_sortino_rank_6m
+(Sortino & Price 1994).
 
 Input:  artifacts/panel_features.parquet
-Output: artifacts/scores.parquet, metrics.json, drivers (backward-compat, 12m full)
-        artifacts/scores_{h}m.parquet, *_{h}m_reduced.* (por horizonte y feature set)
-        artifacts/horizon_comparison.csv (tabla resumen completa)
-        artifacts/plots/signal_*_{h}m.png, *_{h}m_reduced.png
+Output: artifacts/scores.parquet, metrics.json, drivers, fold_diagnostics
+        artifacts/plots/signal_*.png, drivers_elastic.png
 
 Uso:
     python -m scripts.04_train_and_evaluate
@@ -25,9 +24,7 @@ import numpy as np
 import pandas as pd
 
 from src.features import (
-    CORE_FEATURES,
     FEATURE_COLS,
-    REDUCED_FEATURES,
     get_modeling_frame,
 )
 from src.metrics import (
@@ -38,21 +35,16 @@ from src.metrics import (
     quintile_spread_per_date,
     rank_persistence,
 )
-from src.model import ElasticNetModel, LightGBMModel, axiomatic_score, benchmark_naive_score
+from src.model import ElasticNetModel, LightGBMModel, benchmark_naive_score
 from src.paths import ARTIFACTS_DIR, PLOTS_DIR
 from src.splits import walk_forward_folds
 from src.validation import bootstrap_mean_ci, diebold_mariano
 
-# --- Configuracion del walk-forward ---
-MIN_TRAIN_MONTHS = 60   # minimo 5 anios de historia antes del primer fold
+# --- Configuracion ---
+HORIZON = 6              # horizonte de prediccion
+MIN_TRAIN_MONTHS = 60    # minimo 5 anios de historia antes del primer fold
 VAL_MONTHS = 12          # cada fold evalua sobre 12 meses out-of-sample
-HORIZONS = [3, 6, 12]    # horizontes de prediccion a comparar
-
-# Feature sets a evaluar: nombre -> lista de columnas
-FEATURE_SETS = {
-    "full": FEATURE_COLS,          # 23 features
-    "reduced": REDUCED_FEATURES,   # 5 features curadas
-}
+MAX_TRAIN_MONTHS = 120   # ventana rolling: 10 anios de historia
 
 plt.rcParams.update({"figure.dpi": 110, "savefig.dpi": 130, "savefig.bbox": "tight",
                      "axes.spines.top": False, "axes.spines.right": False,
@@ -67,8 +59,10 @@ def run_walk_forward(df: pd.DataFrame, horizon: int,
     las columnas completas del DataFrame (no depende de feature_cols).
     """
     embargo = horizon
-    folds = list(walk_forward_folds(df["mes"], MIN_TRAIN_MONTHS, VAL_MONTHS, embargo))
-    print(f"    {len(folds)} folds generados (embargo={embargo}m, {len(feature_cols)} features)")
+    folds = list(walk_forward_folds(df["mes"], MIN_TRAIN_MONTHS, VAL_MONTHS, embargo,
+                                     max_train_months=MAX_TRAIN_MONTHS))
+    print(f"    {len(folds)} folds generados (embargo={embargo}m, rolling={MAX_TRAIN_MONTHS}m, "
+          f"{len(feature_cols)} features)")
 
     elastic = ElasticNetModel()
     lgbm = LightGBMModel()
@@ -93,10 +87,8 @@ def run_walk_forward(df: pd.DataFrame, horizon: int,
         lgbm_pred, lgbm_info = lgbm.fit_predict(X_tr, y_tr, X_vl)
         # Benchmark naive: ret_12m_rank - fee_rank
         bench_pred = benchmark_naive_score(val)
-        # Axiomático: combinación lineal de ranks con pesos teóricos (sin entrenar)
-        axio_pred = axiomatic_score(val)
 
-        # Capturar TODOS los targets disponibles para validación multi-lente
+        # Capturar TODOS los targets disponibles para validacion multi-lente
         target_capture = ["mes", "fondo", "target_ret", "target_rank"]
         for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
             if opt in val.columns:
@@ -105,7 +97,6 @@ def run_walk_forward(df: pd.DataFrame, horizon: int,
         rows["score_elastic"] = en_pred
         rows["score_lgbm"] = lgbm_pred
         rows["score_benchmark"] = bench_pred
-        rows["score_axiomatic"] = axio_pred
         rows["fold"] = fold.fold_id
         preds_rows.append(rows)
 
@@ -136,26 +127,26 @@ def run_walk_forward(df: pd.DataFrame, horizon: int,
 
 
 def evaluate_signal(scores: pd.DataFrame, score_col: str) -> dict:
-    """Evalua la calidad predictiva de un score: IC, bootstrap, quintiles, hit rate."""
+    """Evalua la calidad predictiva de un score: IC, bootstrap, deciles, hit rate."""
     ic = ic_per_date(scores, score_col, "target_rank")
     summary = ic_summary(ic)
     boot = bootstrap_mean_ci(ic)
-    quint = quintile_spread_per_date(scores, score_col, "target_ret")
-    hit = hit_rate_top_quartile(scores, score_col, "target_ret")
+    decile_spread = quintile_spread_per_date(scores, score_col, "target_sortino", n_q=10)
+    hit = hit_rate_top_quartile(scores, score_col, "target_sortino")
     return {
         "ic_summary": summary,
         "ic_bootstrap": boot,
         "ic_series_index": [str(d.date()) for d in ic.index],
         "ic_series_values": ic.tolist(),
-        "spread_q5_q1_mean": float(quint["spread"].mean()) if len(quint) else np.nan,
-        "spread_q5_q1_pos_pct": float((quint["spread"] > 0).mean()) if len(quint) else np.nan,
+        "spread_d10_d1_mean": float(decile_spread["spread"].mean()) if len(decile_spread) else np.nan,
+        "spread_d10_d1_pos_pct": float((decile_spread["spread"] > 0).mean()) if len(decile_spread) else np.nan,
         "hit_rate_top25_mean": float(hit.mean()) if len(hit) else np.nan,
     }
 
 
 def plot_diagnostics(scores: pd.DataFrame, ic_series: pd.Series,
                      label: str, suffix: str = "") -> None:
-    """Genera graficos de IC y quintiles. suffix diferencia horizonte/feature set."""
+    """Genera graficos de IC y quintiles."""
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 
     axes[0].plot(ic_series.index, ic_series.values, color="#1f4e79", lw=1.2)
@@ -165,15 +156,15 @@ def plot_diagnostics(scores: pd.DataFrame, ic_series: pd.Series,
     axes[0].set_ylabel("Spearman corr")
     axes[0].legend()
 
-    quint = quintile_spread_per_date(scores, f"score_{label}", "target_ret")
-    if len(quint):
-        cols = [c for c in quint.columns if c.startswith("q")]
-        means = quint[cols].mean()
-        axes[1].bar(range(len(means)), means.values * 100, color="#2e7d32")
+    decile = quintile_spread_per_date(scores, f"score_{label}", "target_sortino", n_q=10)
+    if len(decile):
+        cols = [c for c in decile.columns if c.startswith("q")]
+        means = decile[cols].mean()
+        axes[1].bar(range(len(means)), means.values, color="#2e7d32")
         axes[1].set_xticks(range(len(means)))
         axes[1].set_xticklabels(cols)
-        axes[1].set_ylabel("retorno realizado promedio (%)")
-        axes[1].set_title(f"Retorno por quintil ({label}{suffix})")
+        axes[1].set_ylabel("Sortino realizado promedio")
+        axes[1].set_title(f"Sortino por decil ({label}{suffix})")
         axes[1].axhline(0, color="black", lw=0.5)
 
     fig.tight_layout()
@@ -200,23 +191,21 @@ def _prepare_df_for_horizon(df_full: pd.DataFrame, horizon: int,
     """Filtra a observaciones modelables y renombra columnas de target
     a nombres genericos.
 
-    Convención post-refactor:
-      target_rank   = target_sharpe_rank_{h}m  (target de ENTRENAMIENTO)
-      target_ret    = target_ret_{h}m          (retorno realizado, para
-                                                Q5-Q1 en %, interpretable)
-      target_sharpe = target_sharpe_{h}m       (Sharpe realizado, lente)
-      target_sortino = target_sortino_{h}m     (Sortino realizado, lente)
-      target_max_dd = target_max_dd_{h}m       (Max DD realizado, lente)
+    Convencion:
+      target_rank    = target_sortino_rank_{h}m  (target de ENTRENAMIENTO)
+      target_ret     = target_ret_{h}m           (retorno realizado)
+      target_sharpe  = target_sharpe_{h}m        (Sharpe realizado, lente)
+      target_sortino = target_sortino_{h}m       (Sortino realizado, lente)
+      target_max_dd  = target_max_dd_{h}m        (Max DD realizado, lente)
     """
-    df = get_modeling_frame(df_full, horizon=horizon, target="sharpe",
+    df = get_modeling_frame(df_full, horizon=horizon, target="sortino",
                             require_target=require_target)
-    df = df[df["mes"] >= "2010-01-01"].copy()
     rename_map = {
-        f"target_sharpe_rank_{horizon}m": "target_rank",   # entrenamiento
-        f"target_ret_{horizon}m": "target_ret",            # interpretable %
-        f"target_sharpe_{horizon}m": "target_sharpe",      # lente: risk-adj
-        f"target_sortino_{horizon}m": "target_sortino",    # lente: downside
-        f"target_max_dd_{horizon}m": "target_max_dd",      # lente: tail
+        f"target_sortino_rank_{horizon}m": "target_rank",
+        f"target_ret_{horizon}m": "target_ret",
+        f"target_sharpe_{horizon}m": "target_sharpe",
+        f"target_sortino_{horizon}m": "target_sortino",
+        f"target_max_dd_{horizon}m": "target_max_dd",
     }
     rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=rename_map)
@@ -230,213 +219,159 @@ def main() -> None:
     print(">>> 1. cargar features")
     df_full = pd.read_parquet(ARTIFACTS_DIR / "panel_features.parquet")
 
-    comparison_rows = []
-
-    for horizon in HORIZONS:
-        print(f"\n{'='*60}")
-        print(f">>> HORIZONTE {horizon}m")
-        print(f"{'='*60}")
-
-        df = _prepare_df_for_horizon(df_full, horizon)
-        print(f"    panel modelable post-2010: {len(df):,} filas, "
-              f"{df['fondo'].nunique()} fondos, "
-              f"{df['mes'].min().date()} -> {df['mes'].max().date()}")
-
-        for feat_name, feat_cols in FEATURE_SETS.items():
-            is_full = feat_name == "full"
-            tag = f"_{horizon}m" if is_full else f"_{horizon}m_reduced"
-            label_prefix = "" if is_full else " [reduced]"
-
-            print(f"\n--- {feat_name.upper()} ({len(feat_cols)} features) ---")
-
-            scores, coefs, importances, diag = run_walk_forward(df, horizon, feat_cols)
-            print(f"    predicciones OOS: {len(scores):,} filas, "
-                  f"{scores['fold'].nunique()} folds")
-
-            # Evaluar los 4 modelos (ElasticNet, LightGBM, naive, axiomático)
-            results = {}
-            for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
-                col = f"score_{label}"
-                ev = evaluate_signal(scores, col)
-                results[label] = ev
-                ic = pd.Series(ev["ic_series_values"],
-                               index=pd.to_datetime(ev["ic_series_index"]))
-                plot_diagnostics(scores, ic, label, suffix=tag)
-                s = ev["ic_summary"]
-                b = ev["ic_bootstrap"]
-                print(f"    {label:>10s}  IC={s['mean']:+.4f}  IR={s['ic_ir']:+.2f}  "
-                      f"hit={s['hit']:.1%}  Q5-Q1={ev['spread_q5_q1_mean']*100:+.2f}%  "
-                      f"CI95=[{b['ci_low']:+.4f}, {b['ci_high']:+.4f}]")
-
-                comparison_rows.append({
-                    "horizon": horizon,
-                    "features": feat_name,
-                    "n_features": len(feat_cols),
-                    "model": label,
-                    "ic_mean": s["mean"],
-                    "ic_ir": s["ic_ir"],
-                    "ic_ci95_low": b["ci_low"],
-                    "ic_ci95_high": b["ci_high"],
-                    "spread_q5_q1": ev["spread_q5_q1_mean"],
-                    "hit_rate_top25": ev["hit_rate_top25_mean"],
-                    "n_folds": scores["fold"].nunique(),
-                })
-
-            # Diebold-Mariano: ElasticNet vs benchmark
-            losses_en = -ic_per_date(scores, "score_elastic", "target_rank")
-            losses_bm = -ic_per_date(scores, "score_benchmark", "target_rank")
-            dm = diebold_mariano(losses_en, losses_bm, h=horizon)
-            print(f"    DM(elastic vs bench): stat={dm['stat']:+.3f}  p={dm['p_value']:.4f}")
-            results["diebold_mariano_elastic_vs_benchmark"] = dm
-
-            # Diebold-Mariano: ElasticNet vs Axiomático (compara ML vs teoría)
-            losses_ax = -ic_per_date(scores, "score_axiomatic", "target_rank")
-            dm_ax = diebold_mariano(losses_en, losses_ax, h=horizon)
-            print(f"    DM(elastic vs axio):  stat={dm_ax['stat']:+.3f}  p={dm_ax['p_value']:.4f}")
-            results["diebold_mariano_elastic_vs_axiomatic"] = dm_ax
-
-            # Validación multi-lente: cada scoreador vs varios targets forward
-            multi_lens_targets = [c for c in
-                                  ["target_ret", "target_sharpe", "target_sortino", "target_max_dd"]
-                                  if c in scores.columns]
-            multi_lens = {}
-            for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
-                multi_lens[label] = multi_lens_evaluation(
-                    scores, f"score_{label}", multi_lens_targets,
-                )
-                # Persistencia de rank del scoreador (turnover implícito)
-                pers = rank_persistence(scores, f"score_{label}", lag=horizon)
-                multi_lens[label]["_rank_persistence_lag_h"] = pers
-            results["multi_lens"] = multi_lens
-            if is_full and horizon == 12:
-                # Print resumen ejecutivo de multi-lens (solo full + 12m)
-                print("    --- Multi-lens (Q5-Q1 spread medio sobre target realizado):")
-                for label in ["elastic", "lgbm", "benchmark", "axiomatic"]:
-                    parts = []
-                    for tcol in multi_lens_targets:
-                        ml = multi_lens[label].get(tcol, {})
-                        if "q5_minus_q1_mean" in ml:
-                            v = ml["q5_minus_q1_mean"]
-                            parts.append(f"{tcol[7:]}={v:+.3f}")
-                    print(f"      {label:>10s}  " + "  ".join(parts))
-
-            # Drivers
-            plot_drivers(coefs, suffix=tag)
-
-            # Guardar artefactos por horizonte+feature_set
-            scores_out = scores.rename(columns={
-                "target_ret": f"target_ret_{horizon}m",
-                "target_rank": f"target_rank_{horizon}m",
-            })
-            scores_out.to_parquet(ARTIFACTS_DIR / f"scores{tag}.parquet", index=False)
-            coefs.to_csv(ARTIFACTS_DIR / f"drivers_elastic{tag}.csv", index=False)
-            importances.to_csv(ARTIFACTS_DIR / f"drivers_lgbm{tag}.csv", index=False)
-            diag.to_csv(ARTIFACTS_DIR / f"fold_diagnostics{tag}.csv", index=False)
-
-            # Backward-compat: archivos sin sufijo = 12m full
-            if horizon == 12 and is_full:
-                # --- Scoring de producción (post walk-forward) ---
-                last_val_end = diag["val_end"].max()
-                prod_mask = df["mes"] > pd.Timestamp(last_val_end)
-                prod_data = df.loc[prod_mask]
-
-                if len(prod_data) > 0:
-                    print(f"\n    --- PRODUCCION: {prod_data['mes'].nunique()} meses "
-                          f"post walk-forward ({prod_data['mes'].min().date()} -> "
-                          f"{prod_data['mes'].max().date()})")
-
-                    # Entrenar con TODOS los datos hasta last_val_end
-                    train_all = df.loc[df["mes"] <= pd.Timestamp(last_val_end)]
-                    X_tr = train_all[feat_cols]
-                    y_tr = train_all["target_rank"].values
-                    X_prod = prod_data[feat_cols]
-
-                    elastic_prod = ElasticNetModel()
-                    lgbm_prod = LightGBMModel()
-                    en_pred, _ = elastic_prod.fit_predict(X_tr, y_tr, X_prod)
-                    lgbm_pred, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_prod)
-                    bench_pred = benchmark_naive_score(prod_data)
-                    axio_pred = axiomatic_score(prod_data)
-
-                    target_cols = ["mes", "fondo", "target_ret", "target_rank"]
-                    for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
-                        if opt in prod_data.columns:
-                            target_cols.append(opt)
-                    prod_rows = prod_data[target_cols].copy()
-                    prod_rows["score_elastic"] = en_pred
-                    prod_rows["score_lgbm"] = lgbm_pred
-                    prod_rows["score_benchmark"] = bench_pred
-                    prod_rows["score_axiomatic"] = axio_pred
-                    prod_rows["fold"] = -1  # marcador: producción, no walk-forward
-
-                    scores = pd.concat([scores, prod_rows], ignore_index=True)
-                    print(f"    producción: {len(prod_rows)} obs agregadas (fold=-1)")
-                else:
-                    # Si no hay datos de producción, entrenar modelos de todas formas
-                    # para scoring extendido
-                    train_all = df.loc[df["mes"] <= df["mes"].max()]
-                    X_tr = train_all[feat_cols]
-                    y_tr = train_all["target_rank"].values
-                    elastic_prod = ElasticNetModel()
-                    lgbm_prod = LightGBMModel()
-                    elastic_prod.fit_predict(X_tr, y_tr, train_all[feat_cols])
-                    lgbm_prod.fit_predict(X_tr, y_tr, train_all[feat_cols])
-
-                # --- Scoring extendido (features sin target) ---
-                # Solo meses posteriores al último mes de producción (evitar
-                # mezclar fold=-1 y fold=-2 en el mismo mes)
-                prod_months = set(scores.loc[scores["fold"] == -1, "mes"].unique()) if len(scores) else set()
-                last_prod = max(prod_months) if prod_months else pd.Timestamp(last_val_end)
-                df_ext = _prepare_df_for_horizon(df_full, horizon,
-                                                 require_target=False)
-                df_ext = df_ext[df_ext["mes"] >= "2010-01-01"]
-                ext_mask = (df_ext["mes"] > last_prod)
-                ext_data = df_ext.loc[ext_mask]
-
-                if len(ext_data) > 0:
-                    X_ext = ext_data[feat_cols]
-                    en_ext, _ = elastic_prod.fit_predict(X_tr, y_tr, X_ext)
-                    lgbm_ext, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_ext)
-                    bench_ext = benchmark_naive_score(ext_data)
-                    axio_ext = axiomatic_score(ext_data)
-
-                    ext_rows = ext_data[["mes", "fondo"]].copy()
-                    ext_rows["target_ret"] = np.nan
-                    ext_rows["target_rank"] = np.nan
-                    for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
-                        if opt in scores.columns:
-                            ext_rows[opt] = np.nan
-                    ext_rows["score_elastic"] = en_ext
-                    ext_rows["score_lgbm"] = lgbm_ext
-                    ext_rows["score_benchmark"] = bench_ext
-                    ext_rows["score_axiomatic"] = axio_ext
-                    ext_rows["fold"] = -2  # marcador: producción extendida
-
-                    scores = pd.concat([scores, ext_rows], ignore_index=True)
-                    print(f"    extendido: {len(ext_rows)} obs "
-                          f"({ext_data['mes'].nunique()} meses, fold=-2)")
-
-                scores_compat = scores.rename(columns={
-                    "target_ret": "target_ret_12m",
-                    "target_rank": "target_rank",
-                })
-                scores_compat.to_parquet(ARTIFACTS_DIR / "scores.parquet", index=False)
-                coefs.to_csv(ARTIFACTS_DIR / "drivers_elastic.csv", index=False)
-                importances.to_csv(ARTIFACTS_DIR / "drivers_lgbm.csv", index=False)
-                diag.to_csv(ARTIFACTS_DIR / "fold_diagnostics.csv", index=False)
-                with open(ARTIFACTS_DIR / "metrics.json", "w") as f:
-                    json.dump(results, f, indent=2, default=str)
-                plot_drivers(coefs)  # sin sufijo
-
-    # Tabla comparativa final
     print(f"\n{'='*60}")
-    print(">>> TABLA COMPARATIVA")
+    print(f">>> HORIZONTE {HORIZON}m")
     print(f"{'='*60}")
-    comparison = pd.DataFrame(comparison_rows)
-    # Mostrar ordenado por horizonte, luego features, luego modelo
-    comparison = comparison.sort_values(["horizon", "features", "model"]).reset_index(drop=True)
-    print(comparison.to_string(index=False))
-    comparison.to_csv(ARTIFACTS_DIR / "horizon_comparison.csv", index=False)
+
+    df = _prepare_df_for_horizon(df_full, HORIZON)
+    print(f"    panel modelable: {len(df):,} filas, "
+          f"{df['fondo'].nunique()} fondos, "
+          f"{df['mes'].min().date()} -> {df['mes'].max().date()}")
+
+    # --- Walk-forward ---
+    scores, coefs, importances, diag = run_walk_forward(df, HORIZON, FEATURE_COLS)
+    print(f"    predicciones OOS: {len(scores):,} filas, "
+          f"{scores['fold'].nunique()} folds")
+
+    # --- Evaluar 3 modelos (ElasticNet, LightGBM, naive) ---
+    results = {}
+    for label in ["elastic", "lgbm", "benchmark"]:
+        col = f"score_{label}"
+        ev = evaluate_signal(scores, col)
+        results[label] = ev
+        ic = pd.Series(ev["ic_series_values"],
+                       index=pd.to_datetime(ev["ic_series_index"]))
+        plot_diagnostics(scores, ic, label)
+        s = ev["ic_summary"]
+        b = ev["ic_bootstrap"]
+        print(f"    {label:>10s}  IC={s['mean']:+.4f}  IR={s['ic_ir']:+.2f}  "
+              f"hit={s['hit']:.1%}  D10-D1={ev['spread_d10_d1_mean']:+.3f}  "
+              f"CI95=[{b['ci_low']:+.4f}, {b['ci_high']:+.4f}]")
+
+    # --- Diebold-Mariano: ElasticNet vs benchmark ---
+    losses_en = -ic_per_date(scores, "score_elastic", "target_rank")
+    losses_bm = -ic_per_date(scores, "score_benchmark", "target_rank")
+    dm = diebold_mariano(losses_en, losses_bm, h=HORIZON)
+    print(f"    DM(elastic vs bench): stat={dm['stat']:+.3f}  p={dm['p_value']:.4f}")
+    results["diebold_mariano_elastic_vs_benchmark"] = dm
+
+    # --- Validacion multi-lente ---
+    multi_lens_targets = [c for c in
+                          ["target_ret", "target_sharpe", "target_sortino", "target_max_dd"]
+                          if c in scores.columns]
+    multi_lens = {}
+    for label in ["elastic", "lgbm", "benchmark"]:
+        multi_lens[label] = multi_lens_evaluation(
+            scores, f"score_{label}", multi_lens_targets,
+        )
+        pers = rank_persistence(scores, f"score_{label}", lag=HORIZON)
+        multi_lens[label]["_rank_persistence_lag_h"] = pers
+    results["multi_lens"] = multi_lens
+
+    print("    --- Multi-lens (Q5-Q1 spread medio sobre target realizado):")
+    for label in ["elastic", "lgbm", "benchmark"]:
+        parts = []
+        for tcol in multi_lens_targets:
+            ml = multi_lens[label].get(tcol, {})
+            if "q5_minus_q1_mean" in ml:
+                v = ml["q5_minus_q1_mean"]
+                parts.append(f"{tcol[7:]}={v:+.3f}")
+        print(f"      {label:>10s}  " + "  ".join(parts))
+
+    # --- Drivers plot ---
+    plot_drivers(coefs)
+
+    # --- Scoring de produccion (post walk-forward) ---
+    last_val_end = diag["val_end"].max()
+    prod_mask = df["mes"] > pd.Timestamp(last_val_end)
+    prod_data = df.loc[prod_mask]
+
+    if len(prod_data) > 0:
+        print(f"\n    --- PRODUCCION: {prod_data['mes'].nunique()} meses "
+              f"post walk-forward ({prod_data['mes'].min().date()} -> "
+              f"{prod_data['mes'].max().date()})")
+
+        train_all = df.loc[df["mes"] <= pd.Timestamp(last_val_end)]
+        # Aplicar rolling window al train de produccion
+        unique_train_months = sorted(train_all["mes"].unique())
+        if len(unique_train_months) > MAX_TRAIN_MONTHS:
+            cutoff = unique_train_months[-MAX_TRAIN_MONTHS]
+            train_all = train_all.loc[train_all["mes"] >= cutoff]
+        X_tr = train_all[FEATURE_COLS]
+        y_tr = train_all["target_rank"].values
+        X_prod = prod_data[FEATURE_COLS]
+
+        elastic_prod = ElasticNetModel()
+        lgbm_prod = LightGBMModel()
+        en_pred, _ = elastic_prod.fit_predict(X_tr, y_tr, X_prod)
+        lgbm_pred, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_prod)
+        bench_pred = benchmark_naive_score(prod_data)
+
+        target_cols = ["mes", "fondo", "target_ret", "target_rank"]
+        for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
+            if opt in prod_data.columns:
+                target_cols.append(opt)
+        prod_rows = prod_data[target_cols].copy()
+        prod_rows["score_elastic"] = en_pred
+        prod_rows["score_lgbm"] = lgbm_pred
+        prod_rows["score_benchmark"] = bench_pred
+        prod_rows["fold"] = -1  # marcador: produccion, no walk-forward
+
+        scores = pd.concat([scores, prod_rows], ignore_index=True)
+        print(f"    produccion: {len(prod_rows)} obs agregadas (fold=-1)")
+    else:
+        train_all = df.loc[df["mes"] <= df["mes"].max()]
+        # Aplicar rolling window al train de produccion
+        unique_train_months = sorted(train_all["mes"].unique())
+        if len(unique_train_months) > MAX_TRAIN_MONTHS:
+            cutoff = unique_train_months[-MAX_TRAIN_MONTHS]
+            train_all = train_all.loc[train_all["mes"] >= cutoff]
+        X_tr = train_all[FEATURE_COLS]
+        y_tr = train_all["target_rank"].values
+        elastic_prod = ElasticNetModel()
+        lgbm_prod = LightGBMModel()
+        elastic_prod.fit_predict(X_tr, y_tr, train_all[FEATURE_COLS])
+        lgbm_prod.fit_predict(X_tr, y_tr, train_all[FEATURE_COLS])
+
+    # --- Scoring extendido (features sin target) ---
+    prod_months = set(scores.loc[scores["fold"] == -1, "mes"].unique()) if len(scores) else set()
+    last_prod = max(prod_months) if prod_months else pd.Timestamp(last_val_end)
+    df_ext = _prepare_df_for_horizon(df_full, HORIZON, require_target=False)
+    ext_mask = (df_ext["mes"] > last_prod)
+    ext_data = df_ext.loc[ext_mask]
+
+    if len(ext_data) > 0:
+        X_ext = ext_data[FEATURE_COLS]
+        en_ext, _ = elastic_prod.fit_predict(X_tr, y_tr, X_ext)
+        lgbm_ext, _ = lgbm_prod.fit_predict(X_tr, y_tr, X_ext)
+        bench_ext = benchmark_naive_score(ext_data)
+
+        ext_rows = ext_data[["mes", "fondo"]].copy()
+        ext_rows["target_ret"] = np.nan
+        ext_rows["target_rank"] = np.nan
+        for opt in ("target_sharpe", "target_sortino", "target_max_dd"):
+            if opt in scores.columns:
+                ext_rows[opt] = np.nan
+        ext_rows["score_elastic"] = en_ext
+        ext_rows["score_lgbm"] = lgbm_ext
+        ext_rows["score_benchmark"] = bench_ext
+        ext_rows["fold"] = -2  # marcador: produccion extendida
+
+        scores = pd.concat([scores, ext_rows], ignore_index=True)
+        print(f"    extendido: {len(ext_rows)} obs "
+              f"({ext_data['mes'].nunique()} meses, fold=-2)")
+
+    # --- Guardar artefactos ---
+    scores_out = scores.rename(columns={
+        "target_ret": "target_ret_6m",
+        "target_rank": "target_rank",
+    })
+    scores_out.to_parquet(ARTIFACTS_DIR / "scores.parquet", index=False)
+    coefs.to_csv(ARTIFACTS_DIR / "drivers_elastic.csv", index=False)
+    importances.to_csv(ARTIFACTS_DIR / "drivers_lgbm.csv", index=False)
+    diag.to_csv(ARTIFACTS_DIR / "fold_diagnostics.csv", index=False)
+    with open(ARTIFACTS_DIR / "metrics.json", "w") as f:
+        json.dump(results, f, indent=2, default=str)
 
     print(f"\n>>> tiempo total: {time.time() - t0:.1f}s")
 

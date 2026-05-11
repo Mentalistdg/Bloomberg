@@ -14,8 +14,8 @@ IC del modelo, sino la robustez del proceso.
 | Deliverable | Ubicación |
 |---|---|
 | Notebook reproducible | [`notebooks/informe.ipynb`](notebooks/informe.ipynb) |
-| Informe narrativo | [`INFORME.md`](INFORME.md) |
-| Outline de slides (10 láminas) | [`slides_outline.md`](slides_outline.md) |
+| Informe narrativo | [`docs/INFORME.md`](docs/INFORME.md) |
+| Outline de slides (10 láminas) | [`docs/slides_outline.md`](docs/slides_outline.md) |
 | Pipeline de código | `src/` + `scripts/` |
 | Dashboard | `app/backend` (FastAPI) + `app/frontend` (React) |
 
@@ -99,14 +99,14 @@ a todos los scripts que la usen, sin duplicar código.
 │   ├── data.py                       carga de sqlite, retorno total diario, panel mensual
 │   ├── features.py                   ingeniería de features (31 cols) + targets forward (4 lentes)
 │   ├── splits.py                     walk-forward expanding window con embargo = horizonte
-│   ├── model.py                      ElasticNet, LightGBM, benchmark naive, AxiomaticScorer
+│   ├── model.py                      ElasticNet, LightGBM, benchmark naive
 │   ├── metrics.py                    IC, spread Q5-Q1, hit rate, multi-lens, persistencia rank
 │   └── validation.py                 bootstrap CI del IC, test de Diebold-Mariano
 │
 ├── scripts/                          orquestación: se ejecutan en orden 01 → 05
 │   ├── 01_build_features.py          sqlite → panel mensual base (panel_raw.parquet)
 │   ├── 02_eda_report.py              genera 5 gráficos diagnósticos en artifacts/plots/
-│   ├── 03_build_features_full.py     panel_raw → 17 features + target (panel_features.parquet)
+│   ├── 03_build_features_full.py     panel_raw → 32 features + target (panel_features.parquet)
 │   ├── 04_train_and_evaluate.py      walk-forward CV → scores, métricas, drivers, bootstrap
 │   ├── 05_build_app_data.py          scores + métricas → JSONs para el dashboard
 │   └── run_all.py                    ejecuta los 5 scripts en secuencia
@@ -117,7 +117,7 @@ a todos los scripts que la usen, sin duplicar código.
 │
 ├── artifacts/                        outputs reproducibles del pipeline
 │   ├── panel_raw.parquet             panel mensual crudo (output de script 01)
-│   ├── panel_features.parquet        panel con 17 features + target (output de script 03)
+│   ├── panel_features.parquet        panel con 32 features + target (output de script 03)
 │   ├── scores.parquet                score por fondo×mes, todos los folds (output de script 04)
 │   ├── metrics.json                  métricas globales: IC, bootstrap, DM (output de script 04)
 │   ├── drivers_elastic.csv           coeficientes ElasticNet por fold
@@ -126,12 +126,25 @@ a todos los scripts que la usen, sin duplicar código.
 │   └── plots/                        figuras del EDA y diagnósticos de señal
 │
 ├── app/
-│   ├── backend/main.py               FastAPI sirviendo JSONs pre-computados
-│   └── frontend/                     Vite + React + TS + Tailwind
+│   ├── backend/
+│   │   ├── main.py                   FastAPI sirviendo JSONs pre-computados
+│   │   └── data/                     JSONs generados por script 05 (funds, backtest, drivers, portfolio, meta)
+│   └── frontend/
+│       ├── src/pages/                OverviewPage, DetailPage, DriversPage, BacktestPage, PortfolioPage
+│       ├── src/components/           Layout, LoadingScreen, RulerOverlay
+│       ├── src/hooks/                useChartRuler (medición interactiva en gráficos)
+│       └── src/services/api.ts       tipos y funciones de API
+│
+├── docs/                             documentación extendida
+│   ├── INFORME.md                    informe narrativo (entregable)
+│   ├── slides_outline.md            estructura de slides
+│   └── DEPLOYMENT.md                guía operacional EC2/Docker
+│
+├── deploy/                           scripts de provisioning EC2
+│   ├── deploy_ec2.sh
+│   └── deploy_cloudflare.sh
 │
 ├── pyproject.toml                    deps gestionadas con uv
-├── INFORME.md
-├── slides_outline.md
 └── README.md
 ```
 
@@ -147,7 +160,7 @@ assets/usa_fondos_pp.sqlite
         │               02_eda_report ──→ artifacts/plots/ (5 gráficos diagnósticos)
         │
         ▼
-  03_build_features_full ──→ artifacts/panel_features.parquet (17 features + target)
+  03_build_features_full ──→ artifacts/panel_features.parquet (32 features + target)
         │
         ▼
   04_train_and_evaluate ──→ artifacts/scores.parquet
@@ -168,83 +181,62 @@ siguiente. Pipeline reproducible end-to-end con
 
 ## Definición del problema (entregable #1)
 
-**Variable a predecir:** **percentil cross-seccional del Sharpe forward 12m**
-del fondo (`target_sharpe_rank_12m`). Mide simultáneamente retorno y riesgo
-en una métrica única, alineada con la decisión real de selección de fondos
-en una AFP (calidad ajustada por riesgo, no retorno bruto). El retorno
-forward 12m simple se mantiene como métrica reportada en paralelo, no como
-target de entrenamiento.
+**Variable a predecir:** **percentil cross-seccional del Sortino forward 6m**
+del fondo (`target_sortino_rank_6m`). El Sortino penaliza solo la volatilidad
+bajista — la volatilidad alcista es deseable para un fondo, no penalizable.
+Esto lo hace más apropiado que el Sharpe para selección de fondos en una AFP,
+donde interesa calidad ajustada por riesgo downside. El retorno forward 6m
+y el Sharpe forward se mantienen como métricas reportadas en paralelo
+(multi-lens validation), no como target de entrenamiento.
 
 **Enfoque:** **explicativo con validación predictiva**. Modelo lineal
 regularizado (ElasticNet) como primario — coeficientes interpretables y
 defendibles ante un comité — con LightGBM como sanity check de no-linealidad
-y `AxiomaticScorer` (fórmula con pesos teóricos, sin entrenar) como benchmark
-estructural. Tradeoff explícito: priorizamos defensibilidad sobre máxima
-performance OOS.
+y benchmark naive (`ret_12m_rank − fee_rank`) como línea base mínima.
+Tradeoff explícito: priorizamos defensibilidad sobre máxima performance OOS.
 
-## Modelos comparados (4 scoreadores)
+## Modelos comparados (3 scoreadores)
 
 | Modelo | Rol | Mecánica |
 |---|---|---|
 | **ElasticNet** (principal) | Scoring interpretable | Regresión L1+L2 con CV interna de α y l1_ratio (5-fold). Coeficientes son "drivers" para el comité. |
 | **LightGBM** (sanity check) | Detectar no-linealidades | Gradient boosting (depth=4, num_leaves=15). Si supera al lineal, hay interacciones no capturadas. |
-| **AxiomaticScorer** (benchmark teórico) | "Sin entrenar" | Combinación lineal de ranks con pesos teóricos: +0.30·Sharpe_rank − 0.20·fee_rank + 0.20·max_dd_rank − 0.15·pct_acum_rank − 0.15·autocorr_diaria_rank. |
 | **Benchmark naive** | Línea base mínima | `score = ret_12m_rank − fee_rank` (momentum + fee). |
 
 ## Validación
 
-- **Walk-forward expanding window**: 9 folds para horizonte 12m, mínimo
-  60 meses de training, 12 meses de validación, **embargo igual al horizonte
-  del target** (12m para target a 12m) para evitar leakage del forward.
+- **Walk-forward expanding window**: mínimo 60 meses de training, 12 meses
+  de validación, **embargo igual al horizonte del target** (6m) para evitar
+  leakage del forward.
 - **Bootstrap CI**: 5,000 iteraciones sobre la serie mensual de IC.
 - **Diebold-Mariano**: test de superioridad predictiva con corrección
-  Newey-West por autocorrelación. ElasticNet vs benchmark naive y vs
-  AxiomaticScorer.
+  Newey-West por autocorrelación. ElasticNet vs benchmark naive.
 - **Multi-lente OOS**: el mismo score se evalúa sobre **4 targets forward
   realizados** distintos (retorno, Sharpe, Sortino, max drawdown) para
   verificar que el resultado es robusto a cómo se mida la "calidad
   realizada", no solo a la métrica con la que se entrenó.
 - **Persistencia de rank**: correlación entre el rank que el modelo asigna
-  al fondo en T y en T+12m (turnover implícito).
+  al fondo en T y en T+6m (turnover implícito).
 
 ## Stack
 
-- Python 3.14, gestor `uv`.
-- pandas, numpy, scikit-learn, lightgbm, scipy.
+- Python >=3.12, gestor `uv`. Dockerfile usa `python:3.13-slim`.
+- pandas, numpy, scikit-learn, lightgbm, scipy, pyportfolioopt.
 - FastAPI + uvicorn (backend).
 - React 18 + TypeScript + Vite + Tailwind + Recharts (frontend).
 
-## Resultados resumen (target Sharpe forward 12m, full features)
+## Resultados resumen (target Sortino forward 6m, full features)
 
-**IC y CI bootstrap (horizonte 12m):**
+Los resultados numéricos se actualizan al re-ejecutar el pipeline con
+`uv run python -m scripts.04_train_and_evaluate`. Métricas clave disponibles
+en `artifacts/metrics.json` y en el dashboard (pestaña Backtest).
 
-| Modelo | IC mensual | IR | Hit (% meses + ) | CI95 (bootstrap) |
-|---|---|---|---|---|
-| **ElasticNet (primary)** | **+0.190** | **+0.85** | 79.6% | **[+0.147, +0.232]** |
-| LightGBM | +0.150 | +0.59 | 75.9% | [+0.100, +0.199] |
-| AxiomaticScorer | +0.153 | +0.51 | 71.3% | [+0.093, +0.208] |
-| Benchmark naive | +0.117 | +0.50 | 71.3% | [+0.072, +0.160] |
-
-**Diebold-Mariano:** ElasticNet vs benchmark naive `p = 0.093` (significativo
-al 10%, marginal al 5%). ElasticNet vs AxiomaticScorer `p = 0.40` (no
-significativo — el axiomático ya captura buena parte de la señal con teoría).
-
-**Multi-lente — Q5-Q1 spread sobre target realizado (12m):**
-
-| Modelo | Retorno | Sharpe | Sortino | Max DD |
-|---|---|---|---|---|
-| ElasticNet | −1.3% | **+0.37** | **+0.75** | **+0.04** |
-| AxiomaticScorer | −1.0% | +0.26 | +0.70 | +0.03 |
-| LightGBM | −1.6% | +0.27 | +0.21 | +0.02 |
-| Benchmark naive | +0.5% | +0.19 | −0.26 | +0.02 |
-
-**Lectura:** el ElasticNet entrenado con target Sharpe forward gana
-fuertemente en métricas risk-adjusted (+0.37 en Sharpe Q5-Q1, +0.75 en
-Sortino) y reduce drawdowns realizados (+0.04 en max DD), pero **pierde
-en retorno bruto** (−1.3% Q5-Q1) — comportamiento esperado y consistente
-con el target elegido. Una AFP que selecciona fondos para sostener a
-afiliados a largo plazo prefiere fondos de mejor calidad ajustada por
-riesgo aunque sacrifique algo de retorno bruto.
+**Lectura:** el ElasticNet entrenado con target Sortino forward gana
+en métricas risk-adjusted (Sharpe y Sortino Q5-Q1) y reduce drawdowns
+realizados, pero puede perder en retorno bruto — comportamiento esperado
+y consistente con el target elegido. Una AFP que selecciona fondos para
+sostener a afiliados a largo plazo prefiere fondos de mejor calidad
+ajustada por riesgo downside aunque sacrifique algo de retorno bruto.
 
 ## Supuestos, limitaciones y decisiones metodológicas
 
@@ -302,10 +294,11 @@ contra alternativas y el porqué de la elección.
    propiedades stylistic (vol, skewness, drawdown) que correlacionan
    con estilo.
 
-3. **Horizonte único 12m.** Aunque el pipeline soporta horizontes 3m
-   y 6m (ver `horizon_comparison.csv`), el target principal es 12m. Una
+3. **Horizonte único 6m.** El target principal es Sortino forward 6m. Una
    AFP con horizonte multi-año podría preferir señales más persistentes
-   (24m, 36m), pero el dataset acota qué se puede medir.
+   (12m, 24m), pero 6m equilibra reactividad y estabilidad de la señal.
+   Experimentación previa con 3m y 12m fue consolidada a 6m como horizonte
+   de producción.
 
 4. **Sin información de flujos / AUM.** No tenemos AUM por fondo ni
    suscripciones netas. Esto impediría detectar "decreto de retornos a
@@ -318,12 +311,14 @@ contra alternativas y el porqué de la elección.
 
 ### Decisiones metodológicas no triviales
 
-1. **Target Sharpe forward 12m vs retorno forward 12m.** Cambiamos del
-   target retorno al target Sharpe porque captura simultáneamente las
-   dos dimensiones de "fondo bueno" para una AFP (alto retorno + bajo
-   riesgo) en una sola métrica, sin debate sobre pesos. Tradeoff: el
-   modelo entrenado con Sharpe optimiza calidad ajustada por riesgo,
-   sacrifica algo de retorno bruto.
+1. **Target Sortino forward 6m vs Sharpe vs retorno forward.** Cambiamos
+   del target Sharpe al target Sortino porque el Sortino penaliza solo
+   la volatilidad bajista — la volatilidad alcista es deseable en un fondo,
+   no penalizable. El Sharpe trata toda volatilidad por igual, lo cual
+   castiga fondos que suben mucho (exactamente lo que una AFP quiere).
+   Horizonte 6m equilibra reactividad y estabilidad. Tradeoff: el modelo
+   entrenado con Sortino optimiza calidad ajustada por riesgo downside,
+   puede sacrificar algo de retorno bruto.
 
 2. **ElasticNet primario, no LightGBM.** Decisión de "explicativo con
    validación predictiva". ElasticNet da coeficientes interpretables
@@ -331,19 +326,12 @@ contra alternativas y el porqué de la elección.
    no-linealidad. En la evaluación, ElasticNet supera a LightGBM en IC
    y métricas multi-lente, validando la elección.
 
-3. **AxiomaticScorer como benchmark teórico.** Permite contrastar
-   "lo que se aprende empíricamente" con "lo que se sabe estructuralmente"
-   sobre selección de fondos. Si el axiomático bate al ML hay sospecha
-   de overfitting; si el ML bate al axiomático, está capturando matices
-   no triviales. En la evaluación quedan parejos en IC pero ElasticNet
-   gana en lentes risk-adjusted.
-
-4. **Imputación de fee con bfill bajo supuesto estructural.** Discutido
+3. **Imputación de fee con bfill bajo supuesto estructural.** Discutido
    en supuesto #1. Alternativa rechazada: dejar 88% NaN — perdería casi
    toda la utilidad de la variable más causalmente directa para selección
    de fondos.
 
-5. **Filtro de cobertura mínima ≥36 meses.** Fondos con menos de 3 años
+4. **Filtro de cobertura mínima ≥36 meses.** Fondos con menos de 3 años
    de historia no entran al modelo. Justificación: con warmup de 12m +
    horizonte forward de 12m, fondos de <36m generan <12 observaciones
    entrenables — evidencia insuficiente.
@@ -352,6 +340,7 @@ contra alternativas y el porqué de la elección.
 
 | Alternativa | Por qué se descartó |
 |---|---|
+| AxiomaticScorer (benchmark teórico con pesos fijos) | Combinación lineal de ranks con pesos teóricos. Simplificado del pipeline final para reducir complejidad de presentación — queda pareado con ElasticNet en IC, no aporta valor diferenciador claro respecto al benchmark naive. |
 | Clasificación binaria (top-quintil vs resto) | Pierde información ordinal del ranking; menos eficiente que regresión sobre el rank cross-seccional. |
 | RandomForest / XGBoost / RNN | Riesgo alto de overfitting con ~50K obs y ~30 features; menor interpretabilidad. LightGBM cubre la sanity check no-lineal. |
 | Predecir retorno a 1 mes (`shift(-1)`) | A 1m el retorno es ~99% beta de mercado, casi cero alfa de fondo. Horizonte equivocado para selección de fondos en una AFP. |
@@ -361,7 +350,7 @@ contra alternativas y el porqué de la elección.
 
 ## Uso de IA / LLMs (entregable #5)
 
-Documentado en [`INFORME.md`](INFORME.md). Resumen: Claude (Anthropic)
+Documentado en [`docs/INFORME.md`](docs/INFORME.md). Resumen: Claude (Anthropic)
 se usó para discutir metodología iterativamente, hacer code review de
 las decisiones de imputación y target, y generar drafts de docstrings.
 Cada decisión fue validada con consultas reales al dataset (no se

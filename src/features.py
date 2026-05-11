@@ -48,6 +48,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Tasa libre de riesgo constante (proxy T-bill 3m promedio histórico)
+RF_ANNUAL = 0.02                              # 2% anual
+RF_MONTHLY = (1 + RF_ANNUAL) ** (1 / 12) - 1  # ~0.001652 mensual
+
 
 # --- helpers --------------------------------------------------------------
 
@@ -84,8 +88,15 @@ def add_risk_features(df: pd.DataFrame) -> pd.DataFrame:
     df["max_dd_12m"] = df.groupby("fondo", group_keys=False)["ret_mensual"].apply(
         lambda s: _rolling_max_drawdown(s, 12)
     )
-    # Sharpe simplificado (sin risk-free rate): retorno 12m / volatilidad 12m
-    df["sharpe_12m"] = df["ret_12m"] / df["vol_12m"]
+    # Sharpe 12m: (retorno 12m − Rf) / volatilidad 12m, con Rf = 2% anual
+    df["sharpe_12m"] = (df["ret_12m"] - RF_ANNUAL) / df["vol_12m"]
+    # Sortino 12m: (ret_12m − Rf) / downside_deviation_12m anualizada
+    # Fórmula Sortino & Price (1994): downside_dev = sqrt(mean(min(r,0)²)) * sqrt(12)
+    downside_vol_12m = g.apply(
+        lambda s: s.clip(upper=0).pow(2).rolling(12, min_periods=12).mean().pipe(np.sqrt) * np.sqrt(12)
+    )
+    df["sortino_12m"] = (df["ret_12m"] - RF_ANNUAL) / downside_vol_12m
+    df["sortino_12m"] = df["sortino_12m"].replace([np.inf, -np.inf], np.nan)
     return df
 
 
@@ -201,25 +212,26 @@ def add_cross_sectional_ranks(df: pd.DataFrame) -> pd.DataFrame:
 def add_target(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
     """Targets forward para entrenar y validar el scoreador.
 
-    Construye dos métricas forward (mira `horizon` meses hacia adelante) y
-    los rankings cross-seccionales correspondientes. Ambas métricas se
-    calculan sobre la misma ventana de retornos forward (T+1 a T+horizon).
+    Construye tres métricas forward (mira `horizon` meses hacia adelante) y
+    los rankings cross-seccionales correspondientes. Todas se calculan
+    sobre la misma ventana de retornos forward (T+1 a T+horizon).
 
     Targets generados:
       - target_ret_{h}m / target_rank_{h}m:
             Retorno total compuesto a `horizon` meses y su percentil
             dentro del mes T. Métrica naive — captura ganancia bruta sin
             ajustar por riesgo. Se mantiene para reportar resultados en
-            términos interpretables (Q5-Q1 spread en %), pero NO es el
-            target de entrenamiento principal.
+            términos interpretables (Q5-Q1 spread en %).
       - target_sharpe_{h}m / target_sharpe_rank_{h}m:
             Sharpe ratio anualizado a `horizon` meses
             ((mean / std) * sqrt(12)) y su percentil dentro del mes T.
-            Captura simultáneamente retorno y riesgo en una métrica
-            única; es el TARGET PRINCIPAL DE ENTRENAMIENTO porque
-            corresponde mejor a la pregunta de selección de fondos en una
-            AFP (calidad ajustada por riesgo, no retorno bruto). Requiere
-            los `horizon` retornos forward presentes; si faltan, NaN.
+            Captura retorno y riesgo total. Lente de validación.
+      - target_sortino_{h}m / target_sortino_rank_{h}m:
+            Sortino ratio anualizado (Sortino & Price 1994):
+            (mean − Rf) / sqrt(mean(min(r,0)²)) * sqrt(12).
+            Solo penaliza volatilidad a la baja — es el TARGET PRINCIPAL
+            DE ENTRENAMIENTO porque para renta variable la volatilidad
+            al alza es deseable, no penalizable.
     """
     fwd = pd.concat(
         [df.groupby("fondo")["ret_mensual"].shift(-i) for i in range(1, horizon + 1)],
@@ -240,21 +252,32 @@ def add_target(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
     n_valid = fwd.notna().sum(axis=1)
     all_present = n_valid == horizon
     mean_fwd = fwd.mean(axis=1)
+    excess_mean_fwd = mean_fwd - RF_MONTHLY
     std_fwd = fwd.std(axis=1)
-    sharpe = (mean_fwd / std_fwd) * np.sqrt(12)
+    sharpe = (excess_mean_fwd / std_fwd) * np.sqrt(12)
     sharpe = sharpe.replace([np.inf, -np.inf], np.nan).where(all_present, np.nan)
     df[f"target_sharpe_{horizon}m"] = sharpe
     df[f"target_sharpe_rank_{horizon}m"] = df.groupby("mes")[f"target_sharpe_{horizon}m"].rank(
         pct=True, method="average"
     )
 
-    # --- Target 3: Sortino forward (lente de validación, no entrenamiento)
+    # --- Target 3: Sortino forward (TARGET DE ENTRENAMIENTO)
     # Como Sharpe pero penaliza solo volatilidad a la baja. Más robusto
     # ante asimetría — premia fondos que ganan asimétricamente arriba.
-    downside_std_fwd = fwd.where(fwd < 0).std(axis=1)
-    sortino = (mean_fwd / downside_std_fwd) * np.sqrt(12)
-    sortino = sortino.replace([np.inf, -np.inf], np.nan).where(all_present, np.nan)
+    # Fórmula Sortino & Price (1994): downside_dev = sqrt(mean(min(r,0)²))
+    # Usa ddof=0 e incluye ceros para retornos positivos → no produce NaN
+    # cuando hay 0-1 retornos negativos en la ventana.
+    downside_fwd = fwd.clip(upper=0)
+    downside_dev_fwd = np.sqrt((downside_fwd ** 2).mean(axis=1))
+    sortino = (excess_mean_fwd / downside_dev_fwd) * np.sqrt(12)
+    # downside_dev == 0 con excess > 0 ⇒ +inf (fondo sin riesgo downside)
+    # rank() lo ubica en el tope (~1.0), se mantiene intencionalmente.
+    sortino = sortino.replace([-np.inf], np.nan)
+    sortino = sortino.where(all_present, np.nan)
     df[f"target_sortino_{horizon}m"] = sortino
+    df[f"target_sortino_rank_{horizon}m"] = df.groupby("mes")[
+        f"target_sortino_{horizon}m"
+    ].rank(pct=True, method="average")
 
     # --- Target 4: Max drawdown forward (lente de validación)
     # Peor caída pico-valle dentro del horizonte. Mide riesgo de cola
@@ -329,8 +352,8 @@ MIN_FUND_MONTHS = 36
 
 def get_modeling_frame(
     df: pd.DataFrame,
-    horizon: int = 12,
-    target: str = "sharpe",
+    horizon: int = 6,
+    target: str = "sortino",
     min_fund_months: int = MIN_FUND_MONTHS,
     require_target: bool = True,
 ) -> pd.DataFrame:
@@ -351,11 +374,13 @@ def get_modeling_frame(
     ----------
     horizon : int
         Horizonte forward del target en meses (default 12).
-    target : {"sharpe", "ret"}
+    target : {"sortino", "sharpe", "ret"}
         Cuál columna usar como target principal del entrenamiento:
-        - "sharpe" (default, recomendado): target_sharpe_rank_{h}m.
-          Premia retorno ajustado por riesgo. Alineado con la decisión
-          de selección de fondos en una AFP.
+        - "sortino" (recomendado): target_sortino_rank_{h}m.
+          Solo penaliza volatilidad a la baja (Sortino & Price 1994).
+          Más apropiado para renta variable donde upside vol es deseable.
+        - "sharpe": target_sharpe_rank_{h}m.
+          Premia retorno ajustado por riesgo total.
         - "ret": target_rank_{h}m (retorno forward simple). Mantiene
           compatibilidad con la versión anterior del pipeline.
     min_fund_months : int
@@ -366,12 +391,14 @@ def get_modeling_frame(
         permite filas sin target (útil para scoring extendido donde las
         features backward-looking existen pero el target forward no).
     """
-    if target == "sharpe":
+    if target == "sortino":
+        target_col = f"target_sortino_rank_{horizon}m"
+    elif target == "sharpe":
         target_col = f"target_sharpe_rank_{horizon}m"
     elif target == "ret":
         target_col = f"target_rank_{horizon}m"
     else:
-        raise ValueError(f"target debe ser 'sharpe' o 'ret', no {target!r}")
+        raise ValueError(f"target debe ser 'sortino', 'sharpe' o 'ret', no {target!r}")
 
     # Filtro de cobertura mínima por fondo
     n_meses_por_fondo = df.groupby("fondo")["mes"].count()

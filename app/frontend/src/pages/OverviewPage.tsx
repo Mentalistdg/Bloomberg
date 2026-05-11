@@ -14,14 +14,14 @@ type SortKey = keyof Fund;
 
 /* Columns where negative values should render in red */
 const NEG_RED_KEYS = new Set<SortKey>([
-  'ret_12m_trailing', 'sharpe_12m', 'max_dd_12m', 'target_realizado_12m',
+  'ret_12m_trailing', 'sharpe_12m', 'sortino_12m', 'max_dd_12m', 'target_realizado_6m', 'sortino_realizado_6m',
 ]);
 
 interface ColDef {
   key: SortKey;
   label: string;
   tooltip: string;
-  group: 'id' | 'score' | 'perf' | 'risk' | 'struct';
+  group: 'id' | 'score' | 'perf' | 'risk' | 'struct' | 'struct2';
   align: 'left' | 'right';
   format: (f: Fund) => string | null;
 }
@@ -32,11 +32,11 @@ const COLUMNS: ColDef[] = [
     group: 'id', align: 'left', format: f => f.fondo,
   },
   {
-    key: 'decil', label: 'D', tooltip: 'Decil del score (D10 = mejor)',
+    key: 'decil', label: 'D', tooltip: 'Grupo del 1 al 10 según score (D10 = mejor 10%)',
     group: 'id', align: 'left', format: f => f.decil != null ? `D${f.decil}` : null,
   },
   {
-    key: 'score', label: 'Score', tooltip: 'Score compuesto del modelo (0-1)',
+    key: 'score', label: 'Score', tooltip: 'Puntaje asignado por el modelo (0 = peor, 1 = mejor)',
     group: 'score', align: 'right', format: f => fmt(f.score, 3),
   },
   {
@@ -52,6 +52,10 @@ const COLUMNS: ColDef[] = [
     group: 'perf', align: 'right', format: f => fmt(f.sharpe_12m, 2),
   },
   {
+    key: 'sortino_12m', label: 'Sortino', tooltip: 'Ratio Sortino 12 meses (ret/downside vol)',
+    group: 'perf', align: 'right', format: f => fmt(f.sortino_12m, 2),
+  },
+  {
     key: 'max_dd_12m', label: 'Max DD', tooltip: 'Máximo drawdown 12 meses',
     group: 'risk', align: 'right', format: f => pct(f.max_dd_12m),
   },
@@ -61,11 +65,15 @@ const COLUMNS: ColDef[] = [
   },
   {
     key: 'n_instrumentos', label: 'N instr.', tooltip: 'Número de instrumentos subyacentes',
-    group: 'struct', align: 'right', format: f => f.n_instrumentos != null ? String(f.n_instrumentos) : null,
+    group: 'struct2', align: 'right', format: f => f.n_instrumentos != null ? String(f.n_instrumentos) : null,
   },
   {
-    key: 'target_realizado_12m', label: 'Realizado 12m', tooltip: 'Retorno efectivamente observado en los 12 meses posteriores al score (validaci\u00f3n out-of-sample)',
-    group: 'perf', align: 'right', format: f => pct(f.target_realizado_12m),
+    key: 'target_realizado_6m', label: 'Ret Real. 6m', tooltip: 'Retorno efectivamente observado en los 6 meses posteriores al score (validaci\u00f3n out-of-sample)',
+    group: 'perf', align: 'right', format: f => pct(f.target_realizado_6m),
+  },
+  {
+    key: 'sortino_realizado_6m', label: 'Sortino Real. 6m', tooltip: 'Sortino realizado en los 6 meses posteriores al score (forward, OOS)',
+    group: 'perf', align: 'right', format: f => fmt(f.sortino_realizado_6m, 2),
   },
 ];
 
@@ -196,12 +204,12 @@ export default function OverviewPage() {
         <h1 className="text-xl font-bold text-text">Ranking de fondos &mdash; &Uacute;ltimo corte de validaci&oacute;n</h1>
         {meta && (
           <p className="text-sm text-muted mt-1">
-            {meta.n_funds} fondos &middot; corte {meta.as_of} &middot; validado con datos hasta dic 2025 &middot; modelo: {meta.primary_model}
+            {meta.n_funds} fondos en corte {meta.as_of}{meta.n_funds_total ? ` (de ${meta.n_funds_total} modelados en total hist\u00f3rico)` : ''} &middot; modelo: {meta.primary_model}
           </p>
         )}
         <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded-lg bg-panel border border-line text-xs text-muted max-w-4xl">
           <Info size={14} className="shrink-0 text-accent" />
-          <span>Scores del &uacute;ltimo corte validado out-of-sample &middot; &laquo;Realizado 12m&raquo; = retorno efectivo post-score.</span>
+          <span>Scores del &uacute;ltimo corte validado out-of-sample &middot; &laquo;Ret Real. 6m&raquo; = retorno efectivo post-score. El Score predice el <strong>Sortino</strong> <em>futuro</em> a 6 meses (retorno ajustado por riesgo a la baja), no refleja el desempe&ntilde;o actual &mdash; un fondo con alto Sharpe trailing pero comisiones altas puede tener Score bajo.</span>
         </div>
       </div>
 
@@ -331,6 +339,7 @@ export default function OverviewPage() {
                     /* Negative-red text for key columns */
                     const v = f[col.key];
                     const isNeg = NEG_RED_KEYS.has(col.key) && typeof v === 'number' && v < 0;
+                    const isHighVol = col.key === 'vol_12m' && typeof v === 'number' && v > 0.15;
 
                     const formatted = col.format(f);
                     return (
@@ -340,6 +349,7 @@ export default function OverviewPage() {
                           col.align === 'right' ? 'text-right' : '',
                           'font-mono text-sm tabular-nums',
                           isNeg ? 'text-negative' : '',
+                          isHighVol ? 'bg-red-900/40' : '',
                           groupBorder(i),
                         ].filter(Boolean).join(' ')}
                       >

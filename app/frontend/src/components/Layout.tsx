@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { LayoutDashboard, FileText, Layers, LineChart } from 'lucide-react';
+import { LayoutDashboard, FileText, Layers, LineChart, PieChart } from 'lucide-react';
 import clsx from 'clsx';
 import logoImg from '../assets/logo-habitat.png';
 
@@ -8,6 +8,7 @@ const NAV = [
   { to: '/detail', label: 'Ficha de fondo', icon: FileText },
   { to: '/drivers', label: 'Drivers', icon: Layers },
   { to: '/backtest', label: 'Backtest', icon: LineChart },
+  { to: '/portfolio', label: 'Portafolio', icon: PieChart },
 ];
 
 export default function Layout() {
@@ -21,6 +22,10 @@ export default function Layout() {
             <div>
               <div className="text-base font-bold text-text tracking-wide">FUND SCORING</div>
               <div className="text-[10px] text-muted uppercase tracking-widest">Renta Variable Internacional</div>
+              <a href="https://www.linkedin.com/in/davidgonzalezca%C3%B1on/" target="_blank" rel="noopener noreferrer"
+                 className="text-[10px] text-muted hover:text-accent transition-colors">
+                David González Cañón
+              </a>
             </div>
           </div>
           <nav className="flex items-center gap-1">
@@ -52,7 +57,7 @@ export default function Layout() {
 
       {/* Footer */}
       <footer className="border-t border-line py-4 text-center">
-        <p className="text-[11px] text-muted">Scoring out-of-sample &middot; Datos hasta mayo 2026 &middot; &Uacute;ltimo corte validado: dic 2024</p>
+        <p className="text-[11px] text-muted">Scoring out-of-sample &middot; Prueba t&eacute;cnica FEN UChile</p>
       </footer>
     </div>
   );

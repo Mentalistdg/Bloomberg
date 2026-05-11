@@ -98,6 +98,42 @@ def load_subyacentes() -> pd.DataFrame:
     return df
 
 
+def _flag_anomalous_returns(df: pd.DataFrame) -> pd.Series:
+    """Detecta retornos diarios anómalos por gaps temporales o cambios de unidad.
+
+    Regla 1 — Gap temporal: si entre dos observaciones consecutivas de un
+    fondo hay > 45 días calendario, el pct_change no representa un retorno
+    diario real (puede ser un fondo con reporting irregular).
+
+    Regla 2 — Cambio estructural de nivel: si |ret| > 90% y el precio se
+    mantiene en el nuevo nivel (no revierte en las siguientes 3 obs),
+    indica un cambio de unidades/denominación, no un retorno real.
+
+    Retorna una Series booleana (True = anómalo → tratar como NaN).
+    """
+    is_anomalous = pd.Series(False, index=df.index)
+
+    for fondo, g in df.groupby("fondo"):
+        # Regla 1: gap > 45 días entre observaciones consecutivas
+        gaps = g["fecha"].diff().dt.days
+        gap_mask = gaps > 45
+        is_anomalous.loc[g.index[gap_mask]] = True
+
+        # Regla 2: |ret| > 90% sin reversión (cambio de unidades)
+        extreme_idx = g[g["ret_total_raw"].abs() > 0.90].index
+        for idx in extreme_idx:
+            pos = g.index.get_loc(idx)
+            if pos + 3 < len(g):
+                next_prices = g.iloc[pos + 1 : pos + 4]["precio"].values
+                curr_price = g.loc[idx, "precio"]
+                if curr_price > 0 and all(
+                    abs(p / curr_price - 1) < 0.5 for p in next_prices
+                ):
+                    is_anomalous.loc[idx] = True
+
+    return is_anomalous
+
+
 def compute_daily_total_return(historico: pd.DataFrame) -> pd.DataFrame:
     """Calcula el retorno total diario por fondo.
 
@@ -119,6 +155,15 @@ def compute_daily_total_return(historico: pd.DataFrame) -> pd.DataFrame:
     # Paso 2: retorno total crudo = variación de precio + evento de capital
     df["evento_pct_w"] = df["evento_pct"]  # mantener columna por compat
     df["ret_total_raw"] = df["ret_precio"].fillna(0) + df["evento_pct"].fillna(0)
+
+    # Paso 2.5: detectar retornos anómalos (gaps de datos, cambios de unidad)
+    anomalous = _flag_anomalous_returns(df)
+    n_flagged = anomalous.sum()
+    if n_flagged > 0:
+        fondos_afectados = df.loc[anomalous, "fondo"].nunique()
+        print(f"    data quality: {n_flagged} retornos anomalos en "
+              f"{fondos_afectados} fondos -> NaN")
+    df.loc[anomalous, "ret_total_raw"] = np.nan
 
     # Paso 3: winsorizar el retorno TOTAL al p99.5 para controlar outliers
     # genuinos sin destruir la cancelación precio/evento en splits

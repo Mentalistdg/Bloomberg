@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Ruler } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, ReferenceArea } from 'recharts';
 import { Fund, getFundDetail, getFunds } from '../services/api';
+import { useChartRuler } from '../hooks/useChartRuler';
+import RulerOverlay from '../components/RulerOverlay';
 
 export default function DetailPage() {
   const { fondo } = useParams();
   const navigate = useNavigate();
   const [data, setData] = useState<any>(null);
   const [pickList, setPickList] = useState<Fund[]>([]);
+  const ruler = useChartRuler();
 
   useEffect(() => {
     getFunds().then(fs => setPickList(fs.slice(0, 30)));
@@ -44,18 +47,24 @@ export default function DetailPage() {
 
   if (!data) return <div className="flex items-center gap-3 text-muted"><div className="spinner" />Cargando...</div>;
 
-  const series = data.dates.map((d: string, i: number) => ({
-    date: d,
-    equity: data.equity[i],
-  }));
   const s = data.summary;
+  const fechaScore: string | null = s?.fecha_score ?? null;
+
+  const series = data.dates.map((d: string, i: number) => {
+    const atOrBefore = !fechaScore || d <= fechaScore;
+    const atOrAfter = fechaScore && d >= fechaScore;
+    return {
+      date: d,
+      equity_trailing: atOrBefore ? data.equity[i] : undefined,
+      equity_forward: atOrAfter ? data.equity[i] : undefined,
+    };
+  });
   const growthX = data.equity.length > 0 ? data.equity[data.equity.length - 1] / 100 : null;
 
-  const fechaScore: string | null = s?.fecha_score ?? null;
   const forwardEndDate: string | null = fechaScore
     ? (() => {
         const d = new Date(fechaScore);
-        d.setMonth(d.getMonth() + 12);
+        d.setMonth(d.getMonth() + 6);
         return d.toISOString().slice(0, 10);
       })()
     : null;
@@ -75,7 +84,7 @@ export default function DetailPage() {
           {decil != null && <span className={badgeClass}>D{decil}</span>}
           <span className="text-sm text-muted">Score: <span className="font-semibold text-accent">{s?.score?.toFixed(3) ?? '—'}</span></span>
           <span className="text-xs text-muted border-l border-line pl-3">
-            {fechaScore ?? '—'} &middot; Fee {s?.fee != null ? (s.fee * 100).toFixed(1) + '%' : '—'} &middot; {s?.n_instrumentos ?? '—'} instr.
+            {fechaScore ?? '—'} &middot; Fee {s?.fee != null ? s.fee.toFixed(2) + '%' : '—'} &middot; {s?.n_instrumentos ?? '—'} instr.
           </span>
         </div>
         <button onClick={() => navigate('/detail')} className="btn-secondary flex items-center gap-1.5 !py-1.5 !px-3 !text-xs">
@@ -86,20 +95,33 @@ export default function DetailPage() {
 
       {/* Info box */}
       <p className="text-xs text-muted mb-3">
-        <strong className="text-muted">Trailing</strong> = hasta fecha score &middot; <strong className="text-accent">Forward</strong> = retorno realizado 12m post-score.
+        <strong className="text-muted">Trailing</strong> = hasta fecha score &middot; <strong className="text-[#4fc3f7]">Forward (OOS)</strong> = per&iacute;odo de validaci&oacute;n, 6 meses despu&eacute;s del score.
       </p>
 
       {/* Gráfico equity */}
       <div className="card p-5">
         <div className="flex items-baseline justify-between mb-3">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">Retorno total acumulado (base 100, incluye dividendos)</h2>
-          {growthX != null && (
-            <span className="text-sm font-bold text-accent tabular-nums">{growthX.toFixed(1)}x</span>
-          )}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => ruler.isActive ? ruler.deactivate() : ruler.activate()}
+              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border transition-all ${
+                ruler.isActive
+                  ? 'border-accent text-accent bg-accent/10'
+                  : 'border-[#333] text-muted hover:text-text hover:border-[#555]'
+              }`}
+            >
+              <Ruler size={13} />
+              Medir
+            </button>
+            {growthX != null && (
+              <span className="text-sm font-bold text-accent tabular-nums">{growthX.toFixed(1)}x</span>
+            )}
+          </div>
         </div>
-        <div className="h-80">
+        <div className="h-80 relative" ref={ruler.containerRef} style={ruler.isActive ? { cursor: 'crosshair' } : undefined}>
           <ResponsiveContainer>
-            <LineChart data={series}>
+            <LineChart data={series} onClick={ruler.handleChartClick} onMouseMove={ruler.handleChartMouseMove}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" />
               <XAxis dataKey="date" tick={{ fill: '#737373', fontSize: 10 }} axisLine={{ stroke: '#222' }} tickLine={{ stroke: '#222' }} />
               <YAxis tick={{ fill: '#737373', fontSize: 10 }} axisLine={{ stroke: '#222' }} tickLine={{ stroke: '#222' }} />
@@ -110,10 +132,29 @@ export default function DetailPage() {
               {fechaScore && (
                 <ReferenceLine x={fechaScore} stroke="#CF2141" strokeDasharray="4 4" label={{ value: 'Score', position: 'top', fill: '#CF2141', fontSize: 11 }} />
               )}
-              <Line type="monotone" dataKey="equity" stroke="#CF2141" dot={false} strokeWidth={2} />
+              <Line type="monotone" dataKey="equity_trailing" stroke="#CF2141" dot={false} strokeWidth={2} connectNulls={false} name="Trailing" />
+              {fechaScore && (
+                <Line type="monotone" dataKey="equity_forward" stroke="#4fc3f7" dot={false} strokeWidth={2} strokeDasharray="6 3" connectNulls={false} name="Forward (OOS)" />
+              )}
             </LineChart>
           </ResponsiveContainer>
+          <RulerOverlay measurement={ruler.measurement} />
         </div>
+        {ruler.isActive && (
+          <p className="text-xs text-muted mt-2">
+            {ruler.state === 'placing_a' && 'Haz clic en el punto inicial de la medici\u00f3n.'}
+            {ruler.state === 'placing_b' && 'Haz clic en el punto final.'}
+            {ruler.state === 'locked' && ruler.measurement && (
+              <>
+                <span className={ruler.measurement.pctChange >= 0 ? 'text-[#00c853]' : 'text-[#CF2141]'}>
+                  {ruler.measurement.pctChange >= 0 ? '+' : ''}{ruler.measurement.pctChange.toFixed(1)}%
+                </span>
+                {' '}({ruler.measurement.a.date} → {ruler.measurement.b.date})
+                {' '}<span className="text-[#555]">&middot; Clic para reiniciar</span>
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       {/* KPI strip */}
@@ -123,11 +164,13 @@ export default function DetailPage() {
           <KPI label="Ret 12m" value={s?.ret_12m_trailing} pct />
           <KPI label="Vol" value={s?.vol_12m} pct />
           <KPI label="Sharpe" value={s?.sharpe_12m} />
+          <KPI label="Sortino" value={s?.sortino_12m} />
           <KPI label="Max DD" value={s?.max_dd_12m} pct />
         </div>
         <div className="flex items-center gap-4 border-l-2 border-accent pl-3">
-          <span className="text-xs font-semibold uppercase tracking-wider text-accent">Forward 12m</span>
-          <KPI label="Ret realizado" value={s?.target_realizado_12m} pct />
+          <span className="text-xs font-semibold uppercase tracking-wider text-accent">Forward 6m</span>
+          <KPI label="Ret realizado" value={s?.target_realizado_6m} pct />
+          <KPI label="Sortino" value={s?.sortino_realizado_6m} />
         </div>
       </div>
     </div>
