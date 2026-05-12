@@ -46,9 +46,8 @@ npm --prefix app/frontend run dev    # http://localhost:3000
 
 ## Dataset
 
-El archivo `assets/usa_fondos_pp.sqlite` (~80 MB) **no se distribuye con el
-repo** (ver `.gitignore`). Debe colocarse en la carpeta `assets/` antes
-de ejecutar el pipeline. Tres tablas:
+El archivo `assets/usa_fondos_pp.sqlite` (~80 MB) se incluye en el
+repositorio. Tres tablas:
 
 | Tabla | Contenido | Notas |
 |---|---|---|

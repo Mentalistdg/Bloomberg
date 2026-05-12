@@ -102,7 +102,7 @@ Script 04 trains on a single horizon (6 months) with full features and target `t
 
 ### Dataset
 
-`assets/usa_fondos_pp.sqlite` (~80 MB, **not tracked in git** — must be placed in `assets/` before running the pipeline). 277 fondos, 1988-11 → 2026-05. Three tables:
+`assets/usa_fondos_pp.sqlite` (~80 MB, tracked in git). 277 fondos, 1988-11 → 2026-05. Three tables:
 - `historico` — fecha, securities (→ fondo), precio (NAV), evento_pct
 - `fees` — fecha, fondo, fee (89% NULL in raw, reported only from 2024-01-31; pipeline imputes via ffill+bfill under structural stability assumption)
 - `subyacentes` — fecha, nemo_fondo (→ fondo), pct_acum, n_instrumentos
