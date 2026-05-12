@@ -6,22 +6,20 @@ Guia operacional para mantener y actualizar el dashboard de scoring desplegado e
 
 | Recurso | Valor |
 |---------|-------|
-| EC2 Instance ID | `i-0bae26943c56844d7` |
+| EC2 Instance ID | `<your-ec2-instance-id>` |
 | Instance Type | `t3.micro` (1 vCPU, 1GB RAM + 2GB swap) |
 | Region / AZ | `us-east-2` / `us-east-2c` |
 | OS | Ubuntu 24.04 LTS |
-| Security Group | `sg-07ed04df0a4a31fd3` (launch-wizard-1) |
-| Puertos abiertos | 22 (SSH), 80 (Cronnos), 443 (HTTPS), 8000 (Cronnos API), 8080 (Scoring) |
+| Security Group | `<your-security-group-id>` |
+| Puertos abiertos | 22 (SSH), 80 (HTTP), 443 (HTTPS), 8080 (Scoring) |
 | IP publica | Cambia con cada stop/start (no es Elastic IP) |
-| Dominio | `davidgonzalez.cl` (Cloudflare DNS) |
-| Tunnel ID | `eac5852d-a55b-43e0-ba0c-8caa1f1afec8` |
+| Dominio | `<your-domain>` (Cloudflare DNS) |
+| Tunnel ID | `<your-tunnel-id>` |
 
 ## Arquitectura en EC2
 
 ```
 EC2 t3.micro
-  ├── Nginx :80           ← Cronnos (NO TOCAR)
-  ├── Uvicorn :8000       ← Cronnos backend (NO TOCAR)
   ├── Docker container    ← Scoring dashboard
   │   ├── nginx :80 (mapeado a host:8080)
   │   └── uvicorn :8000 (interno al container)
@@ -32,32 +30,29 @@ EC2 t3.micro
 
 | URL | Destino |
 |-----|---------|
-| https://scoring.davidgonzalez.cl | Dashboard scoring fondos |
-| https://cronnos.davidgonzalez.cl | Dashboard tesis Cronnos |
-| https://davidgonzalez.cl | Cronnos / landing |
+| `https://scoring.<your-domain>` | Dashboard scoring fondos |
 
 ## Conectarse a la EC2
 
-La instancia usa key pair `tesis-key` (no disponible localmente). Se accede via **EC2 Instance Connect**.
+La instancia usa key pair configurado en AWS. Se accede via **EC2 Instance Connect**.
 
-### Opcion A: Desde terminal local (Windows)
+### Opcion A: Desde terminal local
 
-Requiere AWS CLI configurado y la key temporal en `~/.ssh/ec2_temp`.
+Requiere AWS CLI configurado y una key temporal en `~/.ssh/<your-key>`.
 
 ```bash
 # Obtener IP actual (cambia con cada stop/start)
-aws ec2 describe-instances --instance-ids i-0bae26943c56844d7 --region us-east-2 \
+aws ec2 describe-instances --instance-ids <your-ec2-instance-id> --region us-east-2 \
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text
 
 # Inyectar key temporal (valida 60 segundos) y conectarse
 aws ec2-instance-connect send-ssh-public-key \
-  --instance-id i-0bae26943c56844d7 \
+  --instance-id <your-ec2-instance-id> \
   --instance-os-user ubuntu \
-  --ssh-public-key "file://C:/Users/dgonz/.ssh/ec2_temp.pub" \
+  --ssh-public-key "file://~/.ssh/<your-key>.pub" \
   --availability-zone us-east-2c \
   --region us-east-2 && \
-"C:/Windows/System32/OpenSSH/ssh.exe" \
-  -i "C:/Users/dgonz/.ssh/ec2_temp" \
+ssh -i "~/.ssh/<your-key>" \
   -o StrictHostKeyChecking=no \
   -o ServerAliveInterval=30 \
   ubuntu@<IP_ACTUAL>
@@ -67,7 +62,7 @@ aws ec2-instance-connect send-ssh-public-key \
 
 ### Opcion B: Desde AWS Console (browser)
 
-1. AWS Console → EC2 → Instances → seleccionar `i-0bae26943c56844d7`
+1. AWS Console → EC2 → Instances → seleccionar tu instancia
 2. Click **Connect** → pestaña **EC2 Instance Connect**
 3. Username: `ubuntu`
 4. Click **Connect**
@@ -96,22 +91,21 @@ curl -s http://localhost:8080/api/health
 # → {"status":"ok"}
 ```
 
-### Re-deploy rapido desde Windows (un comando)
+### Re-deploy rapido desde local (un comando)
 
 ```bash
 # Obtener IP primero
-IP=$(aws ec2 describe-instances --instance-ids i-0bae26943c56844d7 --region us-east-2 \
+IP=$(aws ec2 describe-instances --instance-ids <your-ec2-instance-id> --region us-east-2 \
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
 
 # Inyectar key + SSH + rebuild completo
 aws ec2-instance-connect send-ssh-public-key \
-  --instance-id i-0bae26943c56844d7 \
+  --instance-id <your-ec2-instance-id> \
   --instance-os-user ubuntu \
-  --ssh-public-key "file://C:/Users/dgonz/.ssh/ec2_temp.pub" \
+  --ssh-public-key "file://~/.ssh/<your-key>.pub" \
   --availability-zone us-east-2c \
   --region us-east-2 && \
-"C:/Windows/System32/OpenSSH/ssh.exe" \
-  -i "C:/Users/dgonz/.ssh/ec2_temp" \
+ssh -i "~/.ssh/<your-key>" \
   -o StrictHostKeyChecking=no \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=20 \
@@ -134,7 +128,6 @@ app/backend/data/backtest.json
 Despues de regenerarlos localmente:
 
 ```bash
-# En Windows
 git add app/backend/data/*.json
 git commit -m "Update scoring data"
 git push origin master
@@ -146,12 +139,9 @@ Luego hacer re-deploy en EC2 (ver seccion anterior).
 
 | Campo | Valor |
 |-------|-------|
-| URL | https://github.com/Mentalistdg/Bloomberg |
+| URL | `https://github.com/<your-user>/<your-repo>` |
 | Branch de deploy | `master` |
-| Visibilidad | **Privado** (hacerlo publico temporalmente si se necesita clonar en otra maquina) |
 | Ruta en EC2 | `/home/ubuntu/fund-scoring` |
-
-**IMPORTANTE:** Si necesitas clonar en una maquina nueva, hacer publico temporalmente y volver a privado despues del clone.
 
 ## Comandos utiles en EC2
 
@@ -165,10 +155,6 @@ sudo docker logs scoring-dashboard --tail 50 -f   # follow
 
 # Reiniciar container sin rebuild
 sudo docker restart scoring-dashboard
-
-# Estado de Cronnos
-systemctl status nginx
-ps aux | grep uvicorn
 
 # Estado del tunnel Cloudflare
 sudo systemctl status cloudflared
@@ -187,16 +173,12 @@ sudo docker system df   # espacio Docker
 Config en EC2: `/etc/cloudflared/config.yml`
 
 ```yaml
-tunnel: eac5852d-a55b-43e0-ba0c-8caa1f1afec8
-credentials-file: /etc/cloudflared/eac5852d-a55b-43e0-ba0c-8caa1f1afec8.json
+tunnel: <your-tunnel-id>
+credentials-file: /etc/cloudflared/<your-tunnel-id>.json
 
 ingress:
-  - hostname: scoring.davidgonzalez.cl
+  - hostname: scoring.<your-domain>
     service: http://localhost:8080
-  - hostname: cronnos.davidgonzalez.cl
-    service: http://localhost:80
-  - hostname: davidgonzalez.cl
-    service: http://localhost:80
   - service: http_status:404
 ```
 
@@ -219,22 +201,22 @@ cloudflared tunnel login
 
 ```bash
 # Ver IP actual
-aws ec2 describe-instances --instance-ids i-0bae26943c56844d7 --region us-east-2 \
+aws ec2 describe-instances --instance-ids <your-ec2-instance-id> --region us-east-2 \
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text
 
 # Ver estado
-aws ec2 describe-instances --instance-ids i-0bae26943c56844d7 --region us-east-2 \
+aws ec2 describe-instances --instance-ids <your-ec2-instance-id> --region us-east-2 \
   --query "Reservations[0].Instances[0].[State.Name,InstanceType,PublicIpAddress]" --output text
 
 # Reboot (sin downtime largo)
-aws ec2 reboot-instances --instance-ids i-0bae26943c56844d7 --region us-east-2
+aws ec2 reboot-instances --instance-ids <your-ec2-instance-id> --region us-east-2
 
 # Resize temporal a t3.small (para Docker builds pesados)
-aws ec2 stop-instances --instance-ids i-0bae26943c56844d7 --region us-east-2
+aws ec2 stop-instances --instance-ids <your-ec2-instance-id> --region us-east-2
 # Esperar a stopped...
-aws ec2 modify-instance-attribute --instance-id i-0bae26943c56844d7 \
+aws ec2 modify-instance-attribute --instance-id <your-ec2-instance-id> \
   --instance-type "{\"Value\":\"t3.small\"}" --region us-east-2
-aws ec2 start-instances --instance-ids i-0bae26943c56844d7 --region us-east-2
+aws ec2 start-instances --instance-ids <your-ec2-instance-id> --region us-east-2
 # Despues del build, volver a t3.micro con el mismo proceso
 ```
 
@@ -255,15 +237,6 @@ sudo docker ps | grep scoring
 sudo docker start scoring-dashboard
 # Si fallo, ver logs:
 sudo docker logs scoring-dashboard
-```
-
-### Cronnos no carga
-
-```bash
-sudo systemctl status nginx
-sudo systemctl restart nginx
-# Verificar uvicorn de Cronnos
-ps aux | grep uvicorn
 ```
 
 ### Tunnel Cloudflare caido

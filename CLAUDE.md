@@ -80,7 +80,7 @@ Each script reads artifacts from the previous step and writes to `artifacts/`. T
   - `ElasticNetModel` (primary, interpretable) — ElasticNetCV, coefs as "drivers"
   - `LightGBMModel` (sanity check) — depth=4, num_leaves=15, feature importances
   - `benchmark_naive_score()` — ret_12m_rank − fee_rank, no training
-- **`metrics.py`** — IC (Spearman per date), quintile spread Q5-Q1, hit rate top-quartile, long-short information ratio, rank persistence, `multi_lens_evaluation()` (same score vs 4 realized targets)
+- **`metrics.py`** — IC (Spearman per date), quintile spread D10-D1, hit rate top-quartile, long-short information ratio, rank persistence, `multi_lens_evaluation()` (same score vs 4 realized targets)
 - **`validation.py`** — Bootstrap CI of mean IC (5,000 iterations), Diebold-Mariano test with Newey-West correction
 
 ### Prediction horizon
@@ -109,7 +109,7 @@ Script 04 trains on a single horizon (6 months) with full features and target `t
 
 ### Deployment
 
-Deployed on AWS EC2 (`t3.micro`, `us-east-2`) behind Cloudflare Tunnel. Domain: `scoring.davidgonzalez.cl`. Deploy branch: `master`. See `docs/DEPLOYMENT.md` for operational details (SSH, re-deploy, troubleshooting). The EC2 also hosts an unrelated app (Cronnos) on ports 80/8000 — the scoring dashboard runs in a Docker container mapped to host port 8080.
+Deployed on AWS EC2 (`t3.micro`, `us-east-2`) behind Cloudflare Tunnel. Deploy branch: `master`. See `docs/DEPLOYMENT.md` for operational details (SSH, re-deploy, troubleshooting). The scoring dashboard runs in a Docker container mapped to host port 8080.
 
 ## Conventions
 
@@ -126,78 +126,8 @@ Deployed on AWS EC2 (`t3.micro`, `us-east-2`) behind Cloudflare Tunnel. Domain: 
 - **Git branches:** `main` is the default branch for PRs. `master` is the deploy branch (pushed to EC2). Keep both in sync after merging.
 - **Artifacts are tracked in git** (parquet, CSV, PNG, JSON in `artifacts/` and `app/backend/data/`). This is intentional — ensures the dashboard works without re-running the pipeline. Re-run the pipeline before committing if source logic changes.
 
-## Changelog (uncommitted, post-77d4df2)
+## Changelog (uncommitted)
 
-Summary of changes made since the last commit (`77d4df2 Fix Realizado 12m`). This section helps future agents understand what was modified and why. **Clear this section after committing these changes.**
+Summary of changes made since the last commit. This section helps future agents understand what was modified and why. **Clear this section after committing these changes.**
 
-### 1. Target metric: Sharpe → Sortino
-- Primary training target changed from `target_sharpe_rank_6m` to `target_sortino_rank_6m`.
-- Sortino penalizes only downside volatility — upside movement is desirable for a pension fund (AFP), not penalizable. Better aligned with fund selection philosophy.
-- `src/features.py`: `get_modeling_frame()` default changed to `target="sortino"`. Explicit Sortino target calculation added.
-- `scripts/04_train_and_evaluate.py`: Trains on `target_sortino_rank_6m` exclusively.
-
-### 2. Pipeline consolidation: multi-horizon → single 6m
-- Previously: 3 horizons (3m, 6m, 12m) × 2 feature sets (full, reduced) = 6 configurations.
-- Now: single configuration — 6m Sortino, full features.
-- Deleted all `*_3m.*`, `*_6m.*`, `*_12m.*`, `*_reduced.*` artifact variants (scores, drivers, fold_diagnostics, signal plots).
-- Deleted `artifacts/horizon_comparison.csv` and `artifacts/survivorship_fondos.csv`.
-- AxiomaticScorer (fixed-weight benchmark) removed from production pipeline.
-
-### 3. New dashboard page: Portfolio (`/portfolio`)
-- Mean-variance optimized portfolio of D10 (top-decile) funds.
-- Shows: equity curve (optimized vs equal-weight), current weights, rebalancing history.
-- Uses `pyportfolioopt` (new dependency in `pyproject.toml`) with EMA returns + semicovariance risk model.
-- Backend: new `/api/portfolio` endpoint serving `app/backend/data/portfolio.json`.
-- Frontend: `app/frontend/src/pages/PortfolioPage.tsx`.
-
-### 4. Chart ruler tool (interactive measurement)
-- Click two points on any equity chart to measure % change between them.
-- Files: `app/frontend/src/hooks/useChartRuler.ts`, `app/frontend/src/components/RulerOverlay.tsx`.
-- Integrated in DetailPage and PortfolioPage.
-
-### 5. Backtest page simplification
-- Removed spread chart (D10−D1 as single line) — redundant and less intuitive than the two-line D10 vs D1 comparison.
-- Page now shows: header with D10/D1 explanation, Sortino realizado por decil chart (D10 green, D1 red), metrics table, footnotes.
-
-### 6. Overview page: realized metrics columns
-- Added "Ret Real. 6m" and "Sortino Real. 6m" columns to the fund ranking table.
-- Users can audit score vs realized forward performance.
-
-### 7. Detail page enhancements
-- Equity curve split: red line (trailing) + blue dashed (forward 6m OOS) with shaded forward zone.
-- KPI strip shows both trailing metrics (Ret 12m, Vol, Sharpe, Sortino, Max DD) and forward OOS metrics (Ret realizado 6m, Sortino realizado 6m).
-
-### 8. File reorganization
-- Deploy scripts: root → `deploy/` (deploy_ec2.sh, deploy_cloudflare.sh).
-- Documentation: root → `docs/` (INFORME.md, DEPLOYMENT.md, slides_outline.md).
-
-### 9. API type extensions (`api.ts`)
-- `Fund`: added `target_realizado_6m`, `sortino_realizado_6m`, `sortino_12m`.
-- `FundDetail`: added `ret_mensual` array.
-- New types: `PortfolioData`, `RebalanceHolding`.
-- New function: `getPortfolio()`.
-
-### 10. Dependencies
-- Added `pyportfolioopt>=1.5` to `pyproject.toml` (portfolio optimization in `05_build_app_data.py`).
-
-### 11. Walk-forward: expanding → rolling window
-- `src/splits.py`: added `max_train_months` parameter to `walk_forward_folds()`. `None` = expanding (legacy), `int` = rolling window.
-- `scripts/04_train_and_evaluate.py`: `MAX_TRAIN_MONTHS = 120` (10 years). Applied to both walk-forward folds and production train sets.
-- Rolling window keeps only recent data, adapting to market regime changes (pre/post-2008, zero-rate era, 2022+ inflation).
-- `notebooks/informe.py`: updated section 6 narrative, ASCII diagram, Gantt chart title.
-
-### 12. Notebook section 7: benchmark naive integration
-- Added benchmark naive (`ret_12m_rank − fee_rank`) to all tables, charts, and narrative in section 7 (Resultados OOS).
-- Comparative table now shows 3 models (ElasticNet, LightGBM, Benchmark naive).
-- IC mensual chart and violinplot include benchmark (orange, `#e65100`).
-- Added Diebold-Mariano test output cell showing stat and p-value.
-- Rewrote "Lectura critica" to honestly acknowledge that the benchmark is not statistically surpassed (DM p=0.65), explaining why this is an expected finding (Carhart 1997, momentum + fee dominance) and why the ElasticNet remains preferable (regime adaptation, risk features, interpretability, multi-lens generalization).
-- Multi-lens table and interpretation updated to include benchmark comparison by lens.
-
-### 13. Notebook: cerrar gaps vs criterios de evaluacion
-- **Predictivo vs explicativo** (intro): expanded from 1 line to full subsection discussing interpretability for AFP governance, OOS validation as antidote to post-hoc rationalization, complexity vs interpretability trade-off.
-- **Estacionariedad** (Section 4): new markdown cell explaining why returns are stationary, rank features are stationary by construction, and rolling window handles structural breaks.
-- **Hiperparametros** (new subsection between Sections 6 and 7): explains ElasticNetCV nested CV (4 alphas × 3 l1_ratios), shows table and plot of selected alpha/l1_ratio per fold, interprets temporal evolution (high regularization early → low alpha with more data).
-- **Portfolio narrative** (Section 10): corrected false claim that optimization beats equal-weight. Honest analysis: optimization provides lower max drawdown (-40.3% vs -49.8%) but not higher return. References DeMiguel et al. 2009.
-- **AI section** (Section 11): added concrete prompt example (walk-forward leakage review), detailed validation process (code execution, manual fold inspection, primary source verification).
-- **Extensions** (Section 11): added capacity constraints (Berk & Green 2004), simple ensemble proposal, macro regime features as interactions. New "que haria distinto" subsection with reflective bullets.
+_(No hay cambios pendientes.)_

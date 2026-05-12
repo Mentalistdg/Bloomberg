@@ -748,7 +748,7 @@ def main() -> None:
         "n_funds": len(last_score),           # fondos en el corte mostrado
         "n_funds_total": int(scores["fondo"].nunique()),  # fondos modelados en total
         "n_months": int(scores["mes"].nunique()),
-        "n_folds": int(scores["fold"].nunique()),
+        "n_folds": int(len(fold_diag)),  # solo folds OOS (0-28), excluye fold -1/-2
         "metrics_summary": {
             label: {
                 "ic_mean": metrics[label]["ic_summary"]["mean"],

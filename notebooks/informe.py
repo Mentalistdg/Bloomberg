@@ -27,8 +27,9 @@
 # de poco atractivos.
 #
 # **Target elegido:** percentil cross-seccional del **Sortino ratio forward a 6 meses**
-# (`target_sortino_rank_6m`). El Sortino penaliza solo volatilidad a la baja — la
-# volatilidad al alza es deseable para un fondo de pension, no penalizable.
+# (`target_sortino_rank_6m`). La intuicion detras de esta eleccion es que el Sortino
+# penaliza solo la volatilidad a la baja — para un fondo de pension, la volatilidad
+# al alza no deberia considerarse riesgo en el mismo sentido.
 #
 # **Filosofia:** modelo explicativo con validacion predictiva. ElasticNet como
 # primario (coeficientes interpretables, defendibles ante comite) + LightGBM como
@@ -36,29 +37,33 @@
 #
 # ### Enfoque predictivo vs explicativo
 #
-# La tension entre modelos predictivos y explicativos es central en finanzas
-# aplicadas. Para una AFP, ambas dimensiones son requisito:
+# La pregunta que guia este trabajo es si un modelo relativamente simple puede
+# capturar senales utiles para seleccionar fondos, y al mismo tiempo ser lo
+# suficientemente transparente como para justificarse ante un comite de inversiones.
+# En finanzas aplicadas, la tension entre modelos predictivos y explicativos es
+# permanente, y para una AFP ambas dimensiones parecen ser requisito.
 #
-# - **Dimension explicativa.** Una AFP debe justificar ante su comite de
-#   inversiones y ante la regulacion *por que* selecciono ciertos fondos.
-#   "El modelo dijo" no basta — hay que poder argumentar: "el modelo
-#   penaliza fee alto y premia consistencia de retorno ajustada por riesgo
-#   bajista, que son principios de inversion solidos." Los coeficientes del
-#   ElasticNet son directamente interpretables: cada uno mide cuanto cambia
-#   el score al mover una feature un desvio estandar.
+# Desde la dimension explicativa, una AFP necesita poder argumentar *por que*
+# selecciono ciertos fondos — "el modelo dijo" no basta. Hay que poder decir
+# algo como: "el modelo tiende a penalizar fee alto y a premiar consistencia de
+# retorno ajustada por riesgo bajista, que son principios de inversion razonables."
+# Los coeficientes del ElasticNet facilitan esto: cada uno mide cuanto cambia
+# el score al mover una feature un desvio estandar, lo que permite una auditoria
+# directa de la logica del modelo.
 #
-# - **Dimension predictiva.** Sin validacion fuera de muestra estricta
-#   (walk-forward, embargo, bootstrap CI), un modelo explicativo puede ser
-#   una racionalizacion post-hoc: coeficientes que "hacen sentido" pero no
-#   generalizan a datos futuros. La validacion predictiva es el antidoto
-#   contra el sobreajuste narrativo.
+# Sin embargo, sin validacion fuera de muestra estricta (walk-forward, embargo,
+# bootstrap CI), un modelo explicativo corre el riesgo de ser una racionalizacion
+# post-hoc — coeficientes que "hacen sentido" pero que no necesariamente
+# generalizan a datos futuros. La validacion predictiva funciona como antidoto
+# contra este tipo de sobreajuste narrativo.
 #
-# - **Trade-off.** Un modelo mas complejo (deep learning, ensemble de
-#   gradient boosting) podria mejorar el IC en 1-2 bps marginales, pero
-#   perderia interpretabilidad — inaceptable para gobernanza de inversiones.
-#   El ElasticNet representa el punto optimo: suficientemente flexible para
-#   capturar senales lineales con regularizacion, suficientemente simple
-#   para que cada prediccion sea auditable.
+# Dado lo anterior, el ElasticNet parece ofrecer un equilibrio razonable entre
+# ambas dimensiones. Un modelo mas complejo (deep learning, ensemble de gradient
+# boosting) podria mejorar el IC en algunos puntos marginales, pero a costa de
+# perder interpretabilidad — algo dificil de justificar en un contexto de
+# gobernanza de inversiones. El ElasticNet es suficientemente flexible para
+# capturar senales lineales con regularizacion, y suficientemente simple para
+# que cada prediccion sea auditable.
 #
 # **Reproducibilidad:**
 # ```bash
@@ -222,10 +227,27 @@ fig.tight_layout()
 
 # %% [markdown]
 # **Observaciones:**
-# - 277 fondos en total, con entradas distribuidas desde 1988.
-# - La mayoria de los fondos tiene entre 100 y 400 meses de historia. La linea
-#   roja marca el filtro minimo de 36 meses que se aplica en el modelado.
-# - El universo activo crece fuertemente a partir de ~2000 y se estabiliza ~2010.
+#
+# Lo que se observa es un universo de 277 fondos con entradas distribuidas desde 1988.
+# La mayoria tiene entre 100 y 400 meses de historia — la linea roja marca el filtro
+# minimo de 36 meses que se aplica mas adelante en el modelado. Vale la pena notar
+# que el universo activo crece fuertemente a partir de ~2000 y parece estabilizarse
+# alrededor de 2010.
+
+# %%
+# Survivorship bias: distribucion de fondos vivos/muertos
+from IPython.display import Image
+Image(filename=str(ARTIFACTS / "plots" / "survivorship.png"))
+
+# %% [markdown]
+# **Survivorship bias detectado:** 87.7% de los fondos llegan vivos al final del
+# dataset (mayo 2026). Los 34 "muertos" tienen mediana de cobertura de solo 2
+# meses — lo que sugiere que el dataset es un snapshot del universo vigente al
+# momento de captura, no una historia completa con quiebras reales. El filtro de
+# cobertura minima >= 36 meses excluye a la mayoria de los muertos cortos.
+# Implicacion: el "retorno promedio del universo" esta sesgado al alza; pero como
+# la AFP tambien selecciona entre fondos vivos, el sesgo no invalida el modelo —
+# solo afecta como se interpretan metricas absolutas.
 
 # %% [markdown]
 # ---
@@ -280,15 +302,19 @@ print(f"Fondos: {eom['fondo'].nunique()}, Meses: {eom['mes'].nunique()}")
 # %% [markdown]
 # ### Features intra-mes: microestructura desde datos diarios
 #
-# Las features a nivel mensual (ret_1m, vol_12m, etc.) pierden informacion
-# sobre **como se distribuye el retorno dentro del mes**. Las features
-# intra-mes capturan propiedades de microestructura que solo son observables
-# en datos diarios:
+# La idea detras de estas features es que el retorno mensual agregado pierde
+# informacion sobre como se distribuyo el movimiento dentro del mes. Un fondo
+# que cayo 5% en un solo dia y se recupero lentamente durante las tres semanas
+# siguientes tiene el mismo retorno mensual que uno con movimientos suaves —
+# pero la dinamica intra-mes sugiere cosas muy distintas sobre la liquidez y
+# el riesgo del fondo. Las features intra-mes buscan capturar estas propiedades
+# de microestructura que solo son observables en datos diarios:
 #
-# - **`vol_intrames`**: volatilidad diaria dentro del mes — captura regimenes
-#   de alta incertidumbre (e.g., meses con un solo dia de crash y recuperacion).
+# - **`vol_intrames`**: volatilidad diaria dentro del mes — busca capturar
+#   regimenes de alta incertidumbre (e.g., meses con un solo dia de crash
+#   y recuperacion).
 # - **`autocorr_diaria`**: autocorrelacion de lag-1 del retorno diario.
-#   Valores altos sugieren pricing stale o subyacentes iliquidos.
+#   Valores altos podrian sugerir pricing stale o subyacentes iliquidos.
 # - **`ratio_dias_cero`**: fraccion de dias sin movimiento de precio.
 #   Proxy de iliquidez del fondo o de sus activos subyacentes.
 # - **`evento_pct_mes`**: suma de eventos de capital en el mes (dividendos,
@@ -350,12 +376,13 @@ fig.tight_layout()
 
 # %% [markdown]
 # **Observaciones:**
-# - La distribucion de retornos mensuales es aproximadamente simetrica alrededor de 0,
-#   con colas moderadas. La mediana es ligeramente positiva (~0.5-1% mensual).
-# - El heatmap muestra la crisis de 2008-2009 (rojos intensos) y periodos de
-#   bull market (2013, 2019, 2021).
-# - Las features intra-mes (`vol_intrames`, `autocorr_diaria`, `ratio_dias_cero`)
-#   capturan propiedades de microestructura que se pierden al agregar a mensual.
+#
+# La distribucion de retornos mensuales resulta aproximadamente simetrica alrededor
+# de cero, con colas moderadas y una mediana ligeramente positiva (~0.5-1% mensual).
+# En el heatmap se distingue con claridad la crisis de 2008-2009 (rojos intensos) y
+# los periodos de bull market (2013, 2019, 2021). Lo interesante aqui es que las
+# features intra-mes (`vol_intrames`, `autocorr_diaria`, `ratio_dias_cero`) buscan
+# capturar propiedades de microestructura que tienden a perderse al agregar a mensual.
 
 # %% [markdown]
 # ---
@@ -364,7 +391,17 @@ fig.tight_layout()
 # ### Fee: solo reporta desde 2024, pero es estructural
 #
 # El dataset reporta fees a partir de 2024-01-31 — el **89% del panel es NaN**.
-# Sin embargo, el fee de un mutual fund USA es estructuralmente estable:
+#
+# **Interpretacion del campo `fee`:** los valores reportados en la tabla se
+# interpretan directamente como **fee anual** (expense ratio). Los valores
+# observados (mediana ~0.5-1.5%) son consistentes con los expense ratios
+# tipicos de fondos mutuos USA. Si se intentara anualizarlos (e.g.,
+# multiplicar por 12), los costos resultantes serian excesivos y no tendrian
+# sentido economico. Ademas, el valor se repite identico en cada reporte
+# mensual del mismo fondo — lo que confirma que es una tasa anual fija, no
+# un cobro mensual.
+#
+# El fee de un mutual fund USA es estructuralmente estable:
 # la desviacion intra-fondo es $\approx 0$.
 
 # %%
@@ -421,16 +458,22 @@ print(f"  Antes:  {cobertura_antes:.1%}")
 print(f"  Despues: {cobertura_despues:.1%}")
 
 # %% [markdown]
-# **Decision documentada:** dado que la std intra-fondo es $\approx 0$, el fee es
-# efectivamente constante en el tiempo para cada fondo. Aplicar `ffill+bfill` dentro
-# de cada fondo propaga el valor reportado en 2024+ hacia atras, llevando la
-# cobertura de ~11% a ~98%. La flag `fee_observado` (1 = dato original, 0 = imputado)
-# permite al modelo distinguir ambos casos.
+# **Reflexion sobre la imputacion:** dado que la std intra-fondo es practicamente
+# cero, parece razonable asumir que el fee es estructuralmente constante en el
+# tiempo para cada fondo. Bajo este supuesto, aplicar `ffill+bfill` dentro de cada
+# fondo simplemente propaga el valor reportado en 2024+ hacia atras, llevando la
+# cobertura de ~11% a ~98%. Naturalmente, este supuesto podria no cumplirse para
+# fondos que hayan cambiado su estructura de costos en el pasado — pero la evidencia
+# disponible (std $\approx 0$) sugiere que es una aproximacion razonable. La flag
+# `fee_observado` (1 = dato original, 0 = imputado) permite al modelo distinguir
+# ambos casos, lo que en principio le da la opcion de ponderar distinto la
+# informacion segun su origen.
 #
 # ### Concentracion: n_instrumentos via forward-fill
 #
 # `n_instrumentos` = minimo de holdings para acumular 30% del AUM (snapshot del portafolio).
-# Solo se aplica `ffill` (no `bfill`) porque la composicion SI varia en el tiempo.
+# En este caso solo se aplica `ffill` (no `bfill`) porque la composicion del
+# portafolio si varia en el tiempo — extrapolar hacia atras no seria justificable.
 
 # %%
 # Cobertura de concentracion
@@ -449,10 +492,10 @@ print(f"pct_acum: min={subyacentes['pct_acum'].min():.3f}, "
 # Todas las features son estrictamente **backward-looking** — usan solo
 # informacion disponible hasta la fecha de observacion. El unico elemento
 # forward-looking es el **target** (Sortino forward 6m), protegido por un
-# embargo igual al horizonte en el esquema walk-forward. Esta disciplina
-# anti-leakage (Lopez de Prado, *Advances in Financial Machine Learning*)
-# es critica: una feature que "mire al futuro" inflaria artificialmente
-# las metricas OOS y generaria un modelo inutilizable en produccion.
+# embargo igual al horizonte en el esquema walk-forward. La disciplina de
+# anti-leakage busca asegurar que ninguna feature "mire al futuro" — si eso ocurriera,
+# las metricas OOS se inflarian artificialmente y el modelo seria
+# inutilizable en produccion.
 #
 # Las features se organizan en tres grupos:
 #
@@ -464,32 +507,61 @@ print(f"pct_acum: min={subyacentes['pct_acum'].min():.3f}, "
 #
 # **Total: 32 features.**
 #
-# **CORE (14)** — capturan el desempeño historico del fondo en cuatro dimensiones:
-# - *Momentum* (ret_1/3/6/12m): la persistencia de retornos a distintos plazos.
-#   La literatura muestra que el momentum a 12m es el predictor mas robusto
-#   de retornos futuros de fondos (Carhart 1997).
-# - *Riesgo* (vol_12m, max_dd_12m, sharpe_12m, sortino_12m, skewness_12m):
-#   volatilidad total, drawdown maximo, y ratios ajustados. La skewness
-#   captura asimetria en la distribucion de retornos.
-# - *Consistencia* (hit_rate_12m, persistencia_rank_12m): fraccion de meses
-#   positivos y estabilidad del ranking relativo. Un fondo que gana poco
-#   pero consistentemente puede ser preferible a uno volatil.
-# - *Microestructura* (vol_intrames, autocorr_diaria, ratio_dias_cero):
-#   proxies de liquidez y calidad de pricing del fondo y sus subyacentes.
+# ### Detalle de las 32 features
 #
-# **EXTENDED (5)** — informacion estructural del fondo:
-# - *Fee* (Carhart 1997): el predictor mas robusto de underperformance
-#   futura — es un costo garantizado que reduce retorno neto.
-# - *Concentracion* (log_n_instrumentos, pct_acum): un fondo con pocos
-#   holdings tiene mayor riesgo idiosincratico (riesgo no diversificable).
-# - *Flags* (fee_observado, concentracion_disponible): permiten al modelo
-#   distinguir datos originales de imputados.
+# **CORE (14)** — desempeno historico del fondo:
 #
-# **RANK (13)** — percentiles cross-seccionales de las features mas importantes:
-# - Se calcula el ranking de cada fondo relativo a los demas fondos activos
-#   en el mismo mes. Normaliza a [0, 1], lo que aporta robustez frente a
-#   cambios de regimen de mercado (un retorno del 5% puede ser excelente
-#   en 2008 y mediocre en 2021 — el percentil captura esta relatividad).
+# | # | Feature | Descripcion | Importancia |
+# |---|---|---|---|
+# | 1 | `ret_1m` | Retorno compuesto ultimo mes | Momentum de corto plazo |
+# | 2 | `ret_3m` | Retorno compuesto ultimos 3 meses | Momentum intermedio |
+# | 3 | `ret_6m` | Retorno compuesto ultimos 6 meses | Momentum medio plazo |
+# | 4 | `ret_12m` | Retorno compuesto ultimos 12 meses | Momentum principal, predictor mas robusto |
+# | 5 | `vol_12m` | Volatilidad anualizada (std retornos 12m) | Riesgo total del fondo |
+# | 6 | `max_dd_12m` | Maxima caida pico-valle en 12 meses | Peor escenario historico reciente |
+# | 7 | `sharpe_12m` | Sharpe ratio anualizado 12m | Retorno ajustado por riesgo total |
+# | 8 | `vol_intrames` | Volatilidad diaria dentro del mes | Regimenes de alta incertidumbre intra-mes |
+# | 9 | `autocorr_diaria` | Autocorrelacion lag-1 del retorno diario | Proxy de pricing stale o iliquidez |
+# | 10 | `ratio_dias_cero` | Fraccion de dias sin movimiento de precio | Proxy de iliquidez del subyacente |
+# | 11 | `skewness_12m` | Asimetria de la distribucion de retornos 12m | Distingue fondos con colas asimétricas |
+# | 12 | `hit_rate_12m` | Fraccion de meses positivos en 12m | Consistencia del fondo |
+# | 13 | `distribution_yield_12m` | Suma de eventos de capital / precio (12m) | Estilo income vs growth |
+# | 14 | `persistencia_rank_12m` | Correlacion del ranking relativo en t vs t-12 | Estabilidad de la posicion en el universo |
+#
+# **EXTENDED (5)** — estructura del fondo:
+#
+# | # | Feature | Descripcion | Importancia |
+# |---|---|---|---|
+# | 15 | `fee` | Fee anual del fondo (expense ratio) | Costo garantizado, predictor de underperformance |
+# | 16 | `log_n_instrumentos` | Log del minimo de holdings para acumular 30% del AUM | Diversificacion vs concentracion |
+# | 17 | `pct_acum` | % exacto acumulado por esos holdings (siempre >= 30%) | Nivel de concentracion del portafolio |
+# | 18 | `fee_observado` | Flag: 1 si el fee fue reportado, 0 si imputado | Permite al modelo ponderar dato original vs imputado |
+# | 19 | `concentracion_disponible` | Flag: 1 si hay datos de concentracion | Idem para datos de holdings |
+#
+# **RANK (13)** — percentil cross-seccional [0, 1] de cada feature dentro del mes.
+# Para cada mes, se toman todos los fondos activos y se rankea cada feature de
+# 0 (peor/menor) a 1 (mejor/mayor). Por ejemplo, `ret_3m_rank = 0.85` significa
+# que ese fondo tuvo un retorno a 3 meses mayor que el 85% de los fondos del
+# universo *en ese mismo mes*. Esto normaliza la feature por el contexto de
+# mercado: un retorno de 5% a 3m puede ser excelente en una crisis (rank ~0.95)
+# y mediocre en un bull market (rank ~0.40). Las features rank aportan robustez
+# a cambios de regimen y eliminan diferencias de escala entre periodos:
+#
+# | # | Feature | Feature base rankeada |
+# |---|---|---|
+# | 20 | `ret_3m_rank` | Momentum 3m relativo al universo |
+# | 21 | `ret_12m_rank` | Momentum 12m relativo al universo |
+# | 22 | `vol_12m_rank` | Volatilidad relativa |
+# | 23 | `sharpe_12m_rank` | Sharpe relativo |
+# | 24 | `max_dd_12m_rank` | Drawdown relativo (rank alto = menos profundo) |
+# | 25 | `fee_rank` | Fee relativo al universo |
+# | 26 | `log_n_instrumentos_rank` | Diversificacion relativa |
+# | 27 | `pct_acum_rank` | Concentracion relativa |
+# | 28 | `vol_intrames_rank` | Volatilidad intra-mes relativa |
+# | 29 | `autocorr_diaria_rank` | Iliquidez relativa |
+# | 30 | `ratio_dias_cero_rank` | Iliquidez relativa (dias sin movimiento) |
+# | 31 | `skewness_12m_rank` | Asimetria relativa |
+# | 32 | `hit_rate_12m_rank` | Consistencia relativa |
 
 # %%
 # Cargar panel completo con features (output del pipeline, script 03)
@@ -541,45 +613,47 @@ fig.tight_layout()
 
 # %% [markdown]
 # **Observaciones:**
-# - `sharpe_12m` y `ret_12m` tienen correlacion alta (~0.7-0.8): ambos capturan
-#   momentum, pero sharpe ajusta por riesgo.
-# - `vol_12m` y `max_dd_12m` estan correlacionados negativamente (drawdown mas profundo
-#   = mas volatilidad). Ambos aportan informacion complementaria.
-# - `fee` tiene baja correlacion con las demas features — es una senal
-#   independiente (consistente con Carhart 1997: fee es el predictor mas robusto
-#   de underperformance futura).
+#
+# Lo que se observa en la matriz es que `sharpe_12m` y `ret_12m` tienen correlacion
+# alta (~0.7-0.8) — ambos capturan momentum, pero sharpe ajusta por riesgo. Tambien
+# `vol_12m` y `max_dd_12m` aparecen correlacionados negativamente (drawdown mas
+# profundo = mas volatilidad), aunque ambos parecen aportar informacion complementaria.
+# Un punto interesante es que `fee` tiende a mostrar baja correlacion con las demas
+# features — lo que sugiere que el fee es una senal relativamente independiente
+# de underperformance futura.
 
 # %% [markdown]
 # ### Estacionariedad de las features
 #
-# La estacionariedad es un requisito implicito de cualquier modelo predictivo
-# que asume parametros estables entre entrenamiento y prediccion. En este sistema:
+# Un supuesto importante de cualquier modelo predictivo es que las distribuciones
+# de las features se mantengan razonablemente estables entre entrenamiento y
+# prediccion. En este caso, hay razones para pensar que se cumple — al menos de
+# forma aproximada.
 #
-# 1. **Retornos mensuales son estacionarios.** Las series de precios (NAV)
-#    son no estacionarias (raiz unitaria), pero los retornos mensuales
-#    (`pct_change`) son estacionarios — no requieren diferenciacion adicional.
-#    Todas las features CORE se construyen sobre retornos, no sobre precios.
+# En primer lugar, las series de precios (NAV) son no estacionarias (raiz unitaria),
+# pero los retornos mensuales (`pct_change`) tienden a ser estacionarios y no
+# requieren diferenciacion adicional. Todas las features CORE se construyen sobre
+# retornos, no sobre precios, lo que parece razonable desde esta perspectiva.
 #
-# 2. **Features rank son estacionarias por construccion.** El percentil
-#    cross-seccional se recalcula cada mes sobre los fondos activos en ese
-#    momento. Un rank de 0.8 siempre significa "top 20% de su cohorte",
-#    independientemente del nivel absoluto del mercado. Esto elimina
-#    tendencias y cambios de escala entre regimenes (un retorno del 5%
-#    puede ser excelente en 2008 y mediocre en 2021 — el rank normaliza).
+# En segundo lugar, las features rank son estacionarias por construccion. El
+# percentil cross-seccional se recalcula cada mes sobre los fondos activos en ese
+# momento — un rank de 0.8 siempre significa "top 20% de su cohorte",
+# independientemente del nivel absoluto del mercado. Esto ayuda a eliminar
+# tendencias y cambios de escala entre regimenes.
 #
-# 3. **Ventana rolling descarta datos antiguos.** El esquema walk-forward
-#    con `max_train_months=120` (10 anos) descarta observaciones anteriores,
-#    adaptandose a quiebres estructurales (pre/post-2008, era de tasas cero,
-#    inflacion 2022+) sin asumir que los parametros son globalmente estables.
-#    Esto es preferible a tests formales de estacionariedad (ADF, KPSS) que
-#    asumen estabilidad global — la ventana rolling es un enfoque pragmatico
-#    que reconoce que los mercados cambian.
+# Finalmente, el esquema walk-forward con `max_train_months=120` (10 anos)
+# descarta observaciones anteriores, lo que en principio permite adaptarse a
+# quiebres estructurales (pre/post-2008, era de tasas cero, inflacion 2022+)
+# sin necesidad de asumir que los parametros son globalmente estables. Este
+# enfoque pragmatico parece preferible a tests formales de estacionariedad
+# (ADF, KPSS) que asumen estabilidad global — la ventana rolling reconoce
+# que los mercados cambian, en vez de pretender que no lo hacen.
 
 # %% [markdown]
 # ---
 # ## 5. Construccion del target: por que Sortino y no Sharpe
 #
-# Esta es la **decision metodologica central** del proyecto.
+# Esta es probablemente la decision metodologica mas importante del proyecto.
 #
 # ### Sharpe ratio
 # $$\text{Sharpe} = \frac{\bar{r} - r_f}{\sigma} \cdot \sqrt{12}$$
@@ -588,55 +662,18 @@ fig.tight_layout()
 # que sube mucho un mes y poco otro tiene Sharpe bajo, aunque haya ganado
 # consistentemente.
 #
-# ### Sortino ratio (Sortino & Price, 1994)
+# ### Sortino ratio
 # $$\text{Sortino} = \frac{\bar{r} - r_f}{\sqrt{\frac{1}{n}\sum_{i=1}^{n} \min(r_i, 0)^2}} \cdot \sqrt{12}$$
 #
 # Penaliza **solo la volatilidad a la baja** (downside deviation). La volatilidad
-# al alza es deseable — si un fondo sube 10% un mes y 1% otro, eso es bueno,
-# no es "riesgo".
+# al alza no se considera riesgo — si un fondo sube 10% un mes y 1% otro, eso
+# es deseable, no penalizable.
 #
 # ### Por que Sortino para una AFP
 #
-# Una AFP administra ahorro previsional de largo plazo. El mandato es:
-# - **Maximizar retorno** (para mejorar pensiones futuras)
-# - **Controlar riesgo a la baja** (para proteger el capital de los afiliados)
-#
-# La volatilidad al alza no es un problema — es exactamente lo que la AFP busca.
-# Sortino captura esta asimetria: premia fondos que ganan asimétricamente arriba
-# y penaliza los que pierden.
-
-# %%
-# Ejemplo numerico: dos fondos con mismo retorno promedio
-np.random.seed(42)
-n_meses = 12
-rf_mensual = (1.02) ** (1/12) - 1  # ~0.165% mensual
-
-# Fondo A: volatil al alza (sube mucho algunos meses, nunca pierde mucho)
-retornos_a = np.array([0.08, 0.01, 0.05, -0.01, 0.07, 0.00,
-                        0.06, -0.005, 0.04, 0.02, 0.03, 0.01])
-# Fondo B: volatil a la baja (pierde mucho algunos meses, gana poco)
-retornos_b = np.array([0.03, -0.06, 0.04, 0.03, -0.08, 0.05,
-                        0.02, 0.03, -0.04, 0.06, 0.02, 0.03])
-
-for nombre, r in [("Fondo A (vol al alza)", retornos_a),
-                  ("Fondo B (vol a la baja)", retornos_b)]:
-    ret_medio = r.mean()
-    vol = r.std() * np.sqrt(12)
-    downside = r.clip(max=0)
-    downside_dev = np.sqrt((downside ** 2).mean()) * np.sqrt(12)
-    sharpe = (ret_medio - rf_mensual) / (r.std()) * np.sqrt(12) if r.std() > 0 else np.nan
-    sortino = (ret_medio - rf_mensual) / downside_dev * np.sqrt(12) if downside_dev > 0 else np.nan
-    ret_total = (1 + r).prod() - 1
-    print(f"{nombre}:")
-    print(f"  Retorno total: {ret_total:.1%}, Vol: {vol:.1%}, "
-          f"Sharpe: {sharpe:.2f}, Sortino: {sortino:.2f}")
-    print()
-
-# %% [markdown]
-# El Fondo A tiene Sortino mucho mayor que el B, a pesar de tener mas volatilidad
-# total. **Sharpe no distingue entre ambos** tan claramente porque penaliza la
-# volatilidad al alza del Fondo A. Para una AFP, el Fondo A es claramente
-# preferible: genera retornos fuertes sin grandes perdidas.
+# Para una AFP, la volatilidad al alza no deberia considerarse riesgo — Sortino
+# captura esta asimetria al penalizar solo el downside, premiando fondos que ganan
+# asimetricamente arriba.
 #
 # ### Por que percentil y no valor absoluto
 #
@@ -653,61 +690,33 @@ for nombre, r in [("Fondo A (vol al alza)", retornos_a),
 # absoluto, el modelo aprenderia a predecir el mercado (facil en-muestra,
 # imposible fuera de muestra).
 #
-# ### Horizonte 6 meses — justificacion detallada
-#
-# La eleccion del horizonte es un trade-off entre tres factores:
+# ### Horizonte 6 meses
 
 # %%
 # Distribucion del target en el panel
 # Horizonte = 6 meses, Sortino forward rankeado cross-seccionalmente
 target_col = "target_sortino_rank_6m"
 
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+fig, ax = plt.subplots(figsize=(8, 4))
 
-# Distribucion del target Sortino rank
-sns.histplot(panel[target_col].dropna(), bins=50, ax=axes[0], color="#2e7d32")
-axes[0].set_title(f"Distribucion de {target_col}")
-axes[0].set_xlabel("Percentil (0 = peor, 1 = mejor)")
-axes[0].axvline(0.5, color="red", ls="--", lw=0.8, label="Mediana")
-axes[0].legend()
-
-# Scatter: Sharpe forward vs Sortino forward (nivel, no rank)
-sharpe_col = "target_sharpe_6m"
-sortino_col = "target_sortino_6m"
-muestra = panel.dropna(subset=[sharpe_col, sortino_col]).sample(
-    min(5000, len(panel.dropna(subset=[sharpe_col, sortino_col]))), random_state=42
-)
-sns.scatterplot(data=muestra, x=sharpe_col, y=sortino_col, ax=axes[1],
-                alpha=0.15, s=8, color="#1f4e79")
-axes[1].set_title("Sharpe forward 6m vs Sortino forward 6m")
-axes[1].set_xlabel("Sharpe forward 6m")
-axes[1].set_ylabel("Sortino forward 6m")
-# Linea 45 grados
-lims = [min(axes[1].get_xlim()[0], axes[1].get_ylim()[0]),
-        max(axes[1].get_xlim()[1], axes[1].get_ylim()[1])]
-axes[1].plot(lims, lims, "r--", lw=0.8, alpha=0.5)
+sns.histplot(panel[target_col].dropna(), bins=50, ax=ax, color="#2e7d32")
+ax.set_title(f"Distribucion de {target_col}")
+ax.set_xlabel("Percentil (0 = peor, 1 = mejor)")
+ax.axvline(0.5, color="red", ls="--", lw=0.8, label="Mediana")
+ax.legend()
 
 fig.tight_layout()
 
 # %% [markdown]
-# **Observaciones:**
-# - El target `target_sortino_rank_6m` tiene distribucion uniforme por construccion
-#   (es un percentil rank).
-# - El scatter muestra que Sharpe y Sortino forward estan correlacionados pero
-#   difieren sustancialmente en los extremos. Los fondos con Sortino >> Sharpe
-#   tienen asimetria positiva (volatilidad al alza).
+# **Observacion:** el target `target_sortino_rank_6m` tiene distribucion uniforme
+# por construccion (es un percentil rank). Esto confirma que el ranking esta bien
+# construido — cada posicion relativa tiene la misma frecuencia.
 #
 # ### Horizonte 6 meses (desde el analisis del target)
 #
-# - **3 meses**: demasiado ruidoso — la senal se pierde en ruido estocastico.
-#   El Sortino a 3m tiene solo 3 observaciones mensuales para estimar downside
-#   deviation, lo que genera rankings inestables.
-# - **12 meses**: demasiado lento para capturar cambios de regimen. Ademas,
-#   el embargo de 12m reduce drasticamente el numero de folds de validacion
-#   (~15 vs 29), debilitando la significancia estadistica de las metricas OOS.
-# - **6 meses**: equilibrio entre reactividad y estabilidad. El embargo de
-#   6 meses es manejable (29 folds), y el Sortino a 6m usa 6 observaciones
-#   mensuales — suficientes para una estimacion razonable del downside risk.
+# - **3m**: ruidoso (solo 3 obs para downside deviation, rankings inestables).
+# - **12m**: lento, embargo de 12m reduce folds (~15 vs 29).
+# - **6m**: equilibrio — 29 folds, 6 obs para downside risk.
 
 # %% [markdown]
 # ---
@@ -736,7 +745,7 @@ print(f"Total folds: {len(diag)}")
 print(f"Primer fold: val {diag.iloc[0]['val_start']} -> {diag.iloc[0]['val_end']}")
 print(f"Ultimo fold: val {diag.iloc[-1]['val_start']} -> {diag.iloc[-1]['val_end']}")
 print()
-diag[["fold", "train_start", "train_end", "val_start", "val_end", "n_train", "n_val"]].to_string(index=False)
+diag[["fold", "train_start", "train_end", "val_start", "val_end", "n_train", "n_val"]]
 
 # %%
 # Gantt chart de folds walk-forward
@@ -767,14 +776,17 @@ ax.xaxis.set_major_locator(mdates.YearLocator(5))
 fig.tight_layout()
 
 # %% [markdown]
-# Cada fold desliza la ventana de entrenamiento (máximo 120 meses = 10 años)
-# y evalua el siguiente bloque de 12 meses tras un gap de 6 meses (embargo).
-# En los primeros folds el train crece hasta alcanzar el tope de 120 meses;
-# después se estabiliza y la ventana se desliza manteniendo solo datos recientes.
+# Cada fold desliza la ventana de entrenamiento (maximo 120 meses = 10 anos) y
+# evalua el siguiente bloque de 12 meses tras un gap de 6 meses (embargo). En los
+# primeros folds el train crece hasta alcanzar el tope de 120 meses; despues se
+# estabiliza y la ventana se desliza manteniendo solo datos recientes.
 #
-# **Por que no k-fold?** Los datos financieros tienen dependencia temporal.
-# Un k-fold aleatorio mezclaria futuro con pasado, violando la causalidad
-# y sobreestimando el poder predictivo. Walk-forward respeta la flecha del tiempo.
+# Una alternativa natural seria usar k-fold CV, pero en datos con dependencia
+# temporal esto mezclaria futuro con pasado — violando la causalidad y
+# probablemente sobreestimando el poder predictivo del modelo. Walk-forward,
+# en cambio, respeta la flecha del tiempo: el modelo siempre se entrena con
+# datos anteriores al periodo que intenta predecir, que es como funcionaria
+# en la practica.
 
 # %% [markdown]
 # ### Cross-validacion de hiperparametros
@@ -826,32 +838,38 @@ fig.tight_layout()
 # %% [markdown]
 # **Interpretacion de la evolucion de hiperparametros:**
 #
-# - **Folds tempranos (0-2):** alpha = 1.0 (regularizacion maxima). Con pocos
-#   datos de entrenamiento (~250-500 observaciones), el modelo necesita
-#   regularizacion fuerte para evitar sobreajuste. Todos los coeficientes
-#   son cero — el modelo no encuentra senal confiable.
+# Lo que resulta interesante de esta evolucion es que parece reflejar como el
+# modelo adapta su nivel de regularizacion a la cantidad y calidad de los datos
+# disponibles.
 #
-# - **Folds intermedios (3-11):** alpha oscila entre 0.01 y 1.0. A medida
-#   que crece el dataset, el modelo puede relajar la regularizacion en
-#   algunos periodos, pero vuelve a alpha alto en otros (e.g., fold 7,
-#   post-crisis 2001-2002) cuando la senal es mas ruidosa.
+# En los folds tempranos (0-2), alpha es 1.0 (regularizacion maxima). Con pocos
+# datos de entrenamiento (~250-500 observaciones), el modelo parece necesitar
+# regularizacion fuerte para evitar sobreajuste — de hecho, todos los coeficientes
+# resultan cero, lo que sugiere que no encuentra senal confiable con tan poca
+# informacion.
 #
-# - **Folds recientes (12-28):** alpha se estabiliza en 0.01, con una
-#   excepcion notable (fold 15: alpha=1.0, periodo 2011-2012). El l1_ratio
-#   oscila entre 0.1 y 0.9, indicando que la CV interna adapta la mezcla
-#   L1/L2 segun el periodo: l1_ratio alto (cercano a Lasso) cuando hay
-#   features redundantes que conviene eliminar, l1_ratio bajo (cercano a
-#   Ridge) cuando todas las features aportan.
+# En los folds intermedios (3-11), alpha oscila entre 0.01 y 1.0. A medida que
+# crece el dataset, el modelo puede relajar la regularizacion en algunos periodos,
+# pero vuelve a alpha alto en otros (e.g., fold 7, post-crisis 2001-2002) cuando
+# la senal parece ser mas ruidosa. Esto resulta coherente con la idea de que en
+# periodos de turbulencia hay menos estructura predecible.
 #
-# La tendencia general hacia alpha bajo en folds recientes es consistente
-# con un dataset mas grande y una senal mas estable, que permite al modelo
-# usar coeficientes mas grandes sin sobreajustarse.
+# En los folds recientes (12-28), alpha se estabiliza en 0.01, con una excepcion
+# notable (fold 15: alpha=1.0, periodo 2011-2012). El l1_ratio oscila entre 0.1
+# y 0.9, lo que sugiere que la CV interna adapta la mezcla L1/L2 segun el periodo:
+# l1_ratio alto (cercano a Lasso) cuando podria haber features redundantes que
+# conviene eliminar, l1_ratio bajo (cercano a Ridge) cuando la mayoria de las
+# features parecen aportar informacion.
+#
+# La tendencia general hacia alpha bajo en folds recientes parece consistente con
+# un dataset mas grande y una senal mas estable, que permite al modelo usar
+# coeficientes mas grandes sin sobreajustarse.
 
 # %% [markdown]
 # ---
 # ## 7. Resultados OOS
 #
-# Tres modelos evaluados completamente out-of-sample:
+# Se evaluaron tres modelos completamente out-of-sample:
 #
 # | Modelo | Tipo | Descripcion |
 # |---|---|---|
@@ -859,18 +877,19 @@ fig.tight_layout()
 # | **LightGBM** | ML no-lineal | Gradient boosting, sanity check |
 # | **Benchmark naive** | Heuristica | `ret_12m_rank - fee_rank`, sin entrenamiento |
 #
-# El benchmark naive es metodologicamente necesario: sin el no se puede demostrar
-# que un modelo estadistico agrega valor sobre una heuristica simple. La heuristica
-# combina momentum a 12 meses y fee — los dos predictores mas robustos de la
-# literatura (Carhart 1997).
+# Incluir un benchmark naive parece importante: sin el no habria forma de evaluar
+# si el modelo estadistico realmente agrega algo sobre una heuristica simple. La
+# heuristica combina momentum a 12 meses y fee — que la evidencia sugiere son los
+# dos predictores mas robustos en seleccion de fondos.
 #
 # ### Metricas de evaluacion
 #
 # - **IC (Information Coefficient):** correlacion de Spearman entre el score
 #   predicho y el target realizado, calculada mes a mes. Un IC de +0.05 a +0.10
-#   es tipico en seleccion de fondos (Carhart 1997).
+#   es tipico en seleccion de fondos segun la literatura.
 # - **IC IR (Information Ratio del IC):** media del IC / desvio del IC.
-#   Mide la consistencia de la senal: un IR > 0.20 sugiere senal estable.
+#   Mide la consistencia de la senal: un IR > 0.20 sugiere una senal
+#   razonablemente estable.
 # - **Hit Rate Top-25%:** fraccion de fondos en el cuartil superior del score
 #   que tambien quedan en el cuartil superior del target realizado. Mide la
 #   utilidad practica del score para seleccion.
@@ -937,8 +956,8 @@ for label in modelos:
 ic_df = pd.DataFrame(ic_data)
 
 fig, ax = plt.subplots(figsize=(8, 4))
-sns.violinplot(data=ic_df, x="Modelo", y="IC", ax=ax, inner="box",
-               palette=["#1f4e79", "#2e7d32", "#e65100"])
+sns.boxplot(data=ic_df, x="Modelo", y="IC", ax=ax,
+            palette=["#1f4e79", "#2e7d32", "#e65100"], width=0.5)
 ax.axhline(0, color="red", ls="--", lw=0.8)
 ax.set_title("Distribucion del IC mensual por modelo")
 fig.tight_layout()
@@ -961,52 +980,42 @@ else:
 # %% [markdown]
 # ### Lectura critica de los resultados
 #
-# - **ElasticNet**: IC = +0.070, IR = +0.24, CI95 = [+0.038, +0.103].
-#   El intervalo **no incluye al cero** — se rechaza la hipotesis nula de
-#   ausencia de poder predictivo al 95%. La senal existe pero es modesta.
+# El ElasticNet muestra un IC de +0.070, un IR de +0.24, y un CI95 de
+# [+0.038, +0.103]. El intervalo no incluye al cero, lo que permite rechazar
+# la hipotesis nula de ausencia de poder predictivo al 95%. La senal parece
+# existir, pero es modesta.
 #
-# - **LightGBM**: IC inferior al ElasticNet. No hay evidencia de
-#   no-linealidades aprovechables en los datos — esto **valida la eleccion
-#   del modelo lineal**.
+# El LightGBM tiene IC inferior al ElasticNet, lo que sugiere que no hay
+# no-linealidades aprovechables en los datos — esto parece apoyar la eleccion
+# de un modelo lineal.
 #
-# - **Benchmark naive** (`ret_12m_rank − fee_rank`): IC comparable al
-#   ElasticNet (+0.074 vs +0.070), hit rate similar (~52% vs ~51%) e
-#   incluso IC IR superior (+0.31 vs +0.24). El test de Diebold-Mariano
-#   **no rechaza la igualdad predictiva** (p = 0.65).
+# El resultado mas llamativo es el del benchmark naive (`ret_12m_rank − fee_rank`):
+# su IC es comparable al ElasticNet (+0.074 vs +0.070), el hit rate es similar
+# (~52% vs ~51%) e incluso el IC IR resulta superior (+0.31 vs +0.24). El test
+# de Diebold-Mariano no rechaza la igualdad predictiva (p = 0.65).
 #
-# ### Por que esto es un hallazgo legitimo, no un fracaso
+# ### Que sugiere esto
 #
-# La no-superacion del benchmark naive es **esperada y coherente con la
-# literatura**:
+# A primera vista, que el benchmark naive tenga poder predictivo comparable
+# al ElasticNet podria parecer decepcionante. Sin embargo, al pensarlo con mas
+# cuidado, resulta coherente con lo que la literatura sugiere.
 #
-# 1. **Momentum + fee es una senal potente en fondos mutuos.** Carhart (1997)
-#    demostro que el momentum a 12 meses y los costos (fee) explican la mayor
-#    parte de la persistencia de retornos. En un universo homogeneo (fondos
-#    mutuos USA de renta variable), es estructuralmente dificil superar esta
-#    heuristica simple.
+# Momentum + fee explican la mayor parte de la persistencia en fondos mutuos,
+# y los drivers del ElasticNet confirman que `ret_12m_rank` y
+# `fee_rank` son los coeficientes dominantes — el modelo *converge* hacia la
+# misma heuristica, pero con pesos adaptativos y regularizacion.
 #
-# 2. **El ElasticNet converge hacia la misma heuristica.** Los drivers
-#    (seccion 8) muestran que `ret_12m_rank` y `fee_rank` son los
-#    coeficientes mas importantes — el modelo *aprende* que momentum y fee
-#    son las senales dominantes, pero con pesos adaptativos por fold y
-#    regularizacion que previene sobreajuste.
+# Dicho esto, el modelo parece ofrecer algunas ventajas cualitativas sobre la
+# heuristica. Los pesos varian entre folds, lo que le permite adaptarse a
+# cambios en la importancia relativa de cada feature. Ademas, incorpora
+# dimensiones de riesgo (vol, drawdown, Sortino trailing, skewness) que la
+# heuristica ignora completamente. Cada coeficiente es explicable y defendible
+# ante un comite de inversiones, y el score entrenado con Sortino parece
+# generalizar a otros targets (ver tabla multi-lens) — algo que una heuristica
+# fija no necesariamente garantiza.
 #
-# 3. **Ventajas del modelo sobre la heuristica:**
-#    - **Adaptacion a regimen:** los pesos varian entre folds, capturando
-#      cambios en la importancia relativa de cada feature (visible en la
-#      variabilidad de coeficientes en seccion 8).
-#    - **Features de riesgo:** incorpora vol, drawdown, Sortino trailing,
-#      skewness — dimensiones que la heuristica ignora completamente.
-#    - **Interpretabilidad auditada:** cada coeficiente es explicable y
-#      defendible ante un comite de inversiones.
-#    - **Generalizacion multi-lente:** el score entrenado con Sortino
-#      generaliza a otros targets (ver tabla multi-lens), algo que una
-#      heuristica fija no garantiza.
-#
-# 4. **Contexto de literatura:** la persistencia debil de fondos mutuos
-#    (Berk & Green 2004) implica que cualquier senal predictiva es fragil.
-#    Un IC de +0.05 a +0.10 es tipico, y la no-superacion de heuristicas
-#    simples es consistente con la evidencia empirica.
+# La persistencia debil de fondos mutuos implica que un IC de +0.05 a +0.10
+# y la no-superacion de heuristicas simples son resultados esperados.
 
 # %%
 # Validacion multi-lente: mismo score evaluado contra 4 targets forward realizados
@@ -1031,24 +1040,28 @@ tabla_ml
 # %% [markdown]
 # **Multi-lens (interpretacion):**
 #
-# El score entrenado con target Sortino tiene la senal mas fuerte contra
-# `target_max_dd` — el modelo identifica fondos con menor riesgo de cola,
-# consistente con la penalizacion de downside del Sortino.
+# Lo interesante aqui es que el score entrenado con target Sortino muestra la
+# senal mas fuerte contra `target_max_dd` — lo que parece indicar que el modelo
+# tiende a identificar fondos con menor riesgo de cola, algo coherente con la
+# penalizacion de downside implicita en el Sortino.
 #
-# Contra `target_ret` (retorno bruto), el IC es cercano a cero. Esto es
-# **esperado y coherente**: el modelo no optimiza retorno absoluto sino calidad
-# ajustada por riesgo bajista. Un comite de AFP prefiere un modelo que identifica
-# fondos de menor riesgo a uno que maximiza retorno bruto sin control de riesgo.
+# Contra `target_ret` (retorno bruto), el IC es cercano a cero. Esto resulta
+# esperable: el modelo no busca optimizar retorno absoluto sino calidad ajustada
+# por riesgo bajista. Para un comite de AFP, un modelo que identifica fondos de
+# menor riesgo parece mas util que uno que maximiza retorno bruto sin control
+# de riesgo.
 #
-# ElasticNet domina a LightGBM en la mayoria de las lentes, reforzando la
-# conclusion de que un modelo lineal es suficiente para este problema.
+# El ElasticNet tiende a mostrar IC ligeramente superior al LightGBM en la
+# mayoria de las lentes, lo que parece reforzar la idea de que un modelo lineal
+# es suficiente para este problema.
 #
-# **Benchmark naive vs ElasticNet por lente:** el benchmark tiene IC comparable
-# en las lentes de retorno y Sortino (donde momentum + fee domina), pero el
-# ElasticNet tiende a superarlo en las lentes de riesgo (max drawdown) gracias
-# a las features de volatilidad y microestructura que la heuristica no incorpora.
-# Esto refuerza la ventaja cualitativa del modelo: captura dimensiones de riesgo
-# que una regla simple ignora.
+# En cuanto a la comparacion por lente entre el benchmark naive y el ElasticNet:
+# el benchmark tiene IC comparable en las lentes de retorno y Sortino (donde
+# momentum + fee domina), pero el ElasticNet tiende a superarlo en las lentes de
+# riesgo (max drawdown), probablemente gracias a las features de volatilidad y
+# microestructura que la heuristica no incorpora. Esto parece reforzar la ventaja
+# cualitativa del modelo: captura dimensiones de riesgo que una regla simple
+# no considera.
 
 # %% [markdown]
 # ---
@@ -1081,20 +1094,22 @@ fig.tight_layout()
 # %% [markdown]
 # ### Interpretacion financiera de los drivers
 #
-# **Positivos (el modelo premia):**
-# - `sharpe_12m_rank`, `hit_rate_12m_rank`, `persistencia_rank_12m`: fondos con
-#   buen desempeno ajustado por riesgo, consistentes, y estables en el ranking.
-# - `max_dd_12m_rank` (rank alto = drawdown menos profundo): menor riesgo de cola.
+# Los coeficientes cuentan una historia que parece coherente con la intuicion
+# financiera. El modelo tiende a premiar fondos con buen desempeno ajustado por
+# riesgo (`sharpe_12m_rank`), consistencia en meses positivos (`hit_rate_12m_rank`),
+# estabilidad en el ranking relativo (`persistencia_rank_12m`), y menor riesgo de
+# cola (`max_dd_12m_rank`, donde rank alto = drawdown menos profundo).
 #
-# **Negativos (el modelo penaliza):**
-# - `vol_12m`, `vol_12m_rank`: alta volatilidad total.
-# - `fee_rank`: fee alto (costo garantizado, predictor de underperformance — Carhart 1997).
-# - `autocorr_diaria_rank`: proxy de iliquidez (pricing stale, subyacentes poco liquidos).
+# Del lado negativo, el modelo penaliza alta volatilidad total (`vol_12m`,
+# `vol_12m_rank`), fee alto (`fee_rank` — que la evidencia sugiere es un predictor
+# robusto de underperformance), y autocorrelacion diaria alta
+# (`autocorr_diaria_rank`), que funciona como proxy de iliquidez.
 #
-# **Por que ElasticNet y no LightGBM:** los coeficientes son directamente
-# interpretables y defendibles ante un comite de inversiones. No se necesita
-# recurrir a SHAP o importancias de permutacion — cada coeficiente dice
-# cuanto cambia el score al mover una feature un desvio estandar.
+# Vale la pena notar por que se prefiere el ElasticNet sobre el LightGBM para
+# este analisis: los coeficientes son directamente interpretables y defendibles
+# ante un comite de inversiones. No se necesita recurrir a SHAP o importancias
+# de permutacion — cada coeficiente indica cuanto cambia el score al mover una
+# feature un desvio estandar, lo que facilita la auditoria del modelo.
 
 # %% [markdown]
 # ---
@@ -1153,25 +1168,25 @@ axes[1].set_xlabel("Fecha")
 fig.tight_layout()
 
 # %% [markdown]
-# **Interpretacion:** el spread D10-D1 es positivo en ~51% de los meses. La
-# senal es debil pero existente. Hay periodos donde el modelo funciona bien
-# (decada 2010+) y periodos donde no (crisis 2001-2002, 2008). Esto es
-# consistente con la literatura: la persistencia de fondos es mas fuerte en
-# periodos normales y se rompe en crisis.
+# **Interpretacion:** el spread D10-D1 es positivo en ~51% de los meses. La senal
+# parece existir, aunque es modesta. Hay periodos donde el modelo parece funcionar
+# razonablemente bien (decada 2010+) y otros donde no (crisis 2001-2002, 2008).
+# Esto resulta coherente con lo que la literatura sugiere: la persistencia de fondos
+# tiende a ser mas fuerte en periodos normales y a romperse en periodos de crisis.
 
 # %% [markdown]
 # ---
 # ## 10. Portafolio D10 optimizado
 #
-# Saber cuales fondos son buenos (D10) **no basta** para construir un portafolio.
-# Si los 3 mejores fondos del score invierten en los mismos activos subyacentes
-# (e.g., todos concentrados en tech USA large-cap), asignar 100% a ellos no
-# diversifica riesgo — se esta comprando la misma exposicion tres veces.
+# Identificar fondos atractivos es solo la mitad del problema. Si los 3 mejores
+# fondos del score invierten en los mismos activos subyacentes (e.g., todos
+# concentrados en tech USA large-cap), asignar 100% a ellos no diversifica
+# riesgo — se estaria comprando la misma exposicion tres veces.
 #
-# La **optimizacion de portafolio** resuelve el problema de seleccion vs
+# La optimizacion de portafolio intenta resolver este problema de seleccion vs
 # asignacion: dado un conjunto de fondos atractivos, busca los pesos que
-# maximizan retorno ajustado por riesgo considerando las **correlaciones
-# entre fondos** (co-movimiento) y no solo sus metricas individuales.
+# maximizan retorno ajustado por riesgo considerando las **correlaciones entre
+# fondos** (co-movimiento) y no solo sus metricas individuales.
 #
 # ### Parametros de la optimizacion
 #
@@ -1251,30 +1266,26 @@ fig.tight_layout()
 # **Interpretacion:**
 #
 # La optimizacion con semicovarianza asigna pesos que reflejan no solo la
-# calidad individual de cada fondo (capturada por el score), sino tambien
-# su **contribucion a la diversificacion del portafolio**. Un fondo con score
-# alto pero alta correlacion bajista con el resto del portafolio recibe
-# menos peso que un fondo con score similar pero baja correlacion.
+# calidad individual de cada fondo (capturada por el score), sino tambien su
+# contribucion a la diversificacion del portafolio. Un fondo con score alto
+# pero alta correlacion bajista con el resto del portafolio deberia recibir
+# menos peso que un fondo con score similar pero baja correlacion — al menos
+# en teoria.
 #
-# **Resultados honestos:** la optimizacion **no supera** al equal-weight
-# en retorno anual (9.3% vs 9.8%) ni en equity acumulada. El Sortino es
-# identico (0.79 vs 0.79) y el hit rate es inferior (61.6% vs 65.9%).
-# Donde la optimizacion si aporta es en **control de riesgo de cola**:
-# max drawdown de -40.3% vs -49.8% del equal-weight — una reduccion de
+# Lo que se observa en la practica es que la optimizacion no logra superar al
+# equal-weight en retorno anual (9.3% vs 9.8%) ni en equity acumulada. El
+# Sortino es identico (0.79 vs 0.79) y el hit rate resulta inferior (61.6% vs
+# 65.9%). Donde la optimizacion si parece aportar es en control de riesgo de
+# cola: max drawdown de -40.3% vs -49.8% del equal-weight — una reduccion de
 # ~10 puntos porcentuales en el peor escenario.
 #
-# Este resultado es **esperado y bien documentado** en la literatura:
-# DeMiguel, Garlappi & Uppal (2009) demuestran que con pocos activos
-# (3-6 fondos en D10) y estimacion ruidosa de la matriz de covarianza,
-# el portafolio 1/N es un benchmark muy dificil de superar en retorno.
-# La ventaja de mean-variance se manifiesta en control de riesgo, no en
-# retorno — exactamente lo que observamos.
+# Con pocos activos y covarianza ruidosa, 1/N es dificil de superar en
+# retorno; mean-variance aporta mas bien en control de riesgo.
 #
-# Para una AFP, la reduccion de drawdown es valiosa: un drawdown de -50%
-# requiere un +100% posterior para recuperar capital, mientras que -40%
-# requiere solo +67%. En el contexto de ahorro previsional, la
-# preservacion de capital en crisis es tan importante como el retorno
-# esperado.
+# Para una AFP, la reduccion de drawdown podria ser valiosa: un drawdown de -50%
+# requiere un +100% posterior para recuperar capital, mientras que -40% requiere
+# solo +67%. En el contexto de ahorro previsional, la preservacion de capital en
+# crisis parece ser tan importante como el retorno esperado.
 
 # %% [markdown]
 # ---
@@ -1282,57 +1293,68 @@ fig.tight_layout()
 #
 # ### Limitaciones reconocidas
 #
-# 1. **Survivorship bias parcial.** La mayoria de los fondos llegan vivos al final
-#    del dataset — los "muertos" tienen historia muy corta, sugiriendo un snapshot
-#    del universo vigente, no historia con quiebras reales.
+# Reflexionando sobre el proceso, la limitacion que mas me incomoda es el
+# **survivorship bias parcial**: la mayoria de los fondos llegan vivos al final
+# del dataset, y los "muertos" tienen historia muy corta. Esto sugiere que el
+# dataset es mas bien un snapshot del universo vigente que una historia completa
+# con quiebras reales — lo que podria sesgar las metricas hacia arriba.
 #
-# 2. **Sin benchmark de estilo.** Los fondos estan anonimizados — no se puede
-#    comparar contra su benchmark natural (growth vs value, large vs small).
-#    Mitigacion parcial: features estilisticas capturan propiedades correlacionadas.
+# Otra limitacion relevante es la **anonimizacion de los fondos**: sin saber el
+# estilo de cada fondo (growth vs value, large vs small), no se puede comparar
+# contra su benchmark natural. Las features estilisticas capturan propiedades
+# correlacionadas, pero es una mitigacion parcial.
 #
-# 3. **Horizonte unico (6m).** Toda la evaluacion depende de un solo horizonte.
-#    Un sistema productivo deberia evaluar multiples horizontes y combinar senales.
-#
-# 4. **Sin AUM ni flujos.** Imposibilita detectar diseconomies of scale
-#    (Berk & Green 2004) y diferenciar fondos chicos de grandes.
-#
-# 5. **Liquidez por proxies indirectos.** No hay variable directa de liquidez;
-#    se usan `autocorr_diaria`, `ratio_dias_cero`, `vol_intrames` como proxies
-#    derivados de la serie diaria.
+# Tambien vale la pena mencionar que toda la evaluacion depende de un **horizonte
+# unico (6m)** — un sistema productivo probablemente deberia evaluar multiples
+# horizontes y combinar senales. La **ausencia de AUM y flujos** imposibilita
+# detectar diseconomies of scale y diferenciar fondos chicos
+# de grandes. Y la **liquidez se captura por proxies indirectos**
+# (`autocorr_diaria`, `ratio_dias_cero`, `vol_intrames`) derivados de la serie
+# diaria, sin una variable directa.
 #
 # ### Extensiones posibles
 #
-# - **Features macro/mercado** (VIX, term spread, dollar index) como
-#   interacciones con features existentes, no como predictores directos.
-#   La pregunta es si el scoring deberia ser condicional al estado del mercado
-#   (e.g., penalizar vol mas en regimenes de alta incertidumbre).
-# - **Datos de holdings agregados** (style box, exposicion sectorial) para
-#   sustituir los proxies actuales de concentracion.
-# - **Backtest con costos de transaccion** y rebalanceo realista.
-# - **Combinacion con due diligence cualitativa** — el score cuantitativo
-#   debiera ser un input dentro de un proceso multi-factor.
-# - **Capacity constraints.** Con acceso a AUM y flujos, se podria modelar
-#   el efecto de diseconomies of scale (Berk & Green 2004): fondos que
-#   captan mucho AUM post-buen-performance tienden a revertir porque los
-#   costos de impacto de mercado crecen con el tamano.
-# - **Ensemble simple.** Un promedio ponderado entre ElasticNet y benchmark
-#   naive podria capturar lo mejor de ambos (adaptacion del modelo +
-#   robustez de la heuristica) sin perder interpretabilidad — los pesos
-#   del ensemble serian dos numeros auditables.
+# Una linea que me parece prometedora es incorporar **features macro/mercado**
+# (VIX, term spread, dollar index) como interacciones con features existentes, no
+# como predictores directos. La pregunta de fondo es si el scoring deberia ser
+# condicional al estado del mercado — por ejemplo, penalizar la volatilidad mas
+# en regimenes de alta incertidumbre. Tambien seria valioso contar con **datos de
+# holdings agregados** (style box, exposicion sectorial) para sustituir los proxies
+# actuales de concentracion.
+#
+# Desde una perspectiva practica, un **backtest con costos de transaccion** y
+# rebalanceo realista daria una vision mas honesta del alpha neto. Y el score
+# cuantitativo debiera pensarse como un input dentro de un proceso multi-factor
+# que incluya **due diligence cualitativa**.
+#
+# Dos extensiones mas especificas: con acceso a AUM y flujos, se podrian modelar
+# **capacity constraints** — fondos que captan mucho AUM post-buen-performance
+# tienden a revertir porque los costos de impacto de mercado crecen con el
+# tamano. Y un **ensemble simple**
+# (promedio ponderado entre ElasticNet y benchmark naive) podria capturar lo mejor
+# de ambos — adaptacion del modelo + robustez de la heuristica — sin perder
+# interpretabilidad, dado que los pesos del ensemble serian dos numeros auditables.
 #
 # ### Que haria distinto con mas tiempo
 #
-# Reflexionando sobre el proceso, las areas donde invertiria mas esfuerzo:
-#
-# 1. **Validacion del universo.** Dedicar mas tiempo a entender el sesgo de
-#    supervivencia — cuantos fondos realmente "murieron" vs simplemente
-#    dejaron de reportar. Esto afecta la calibracion del backtest.
-# 2. **Feature selection formal.** Aunque el ElasticNet hace seleccion
-#    implicita (L1), probar Boruta o seleccion secuencial para confirmar
-#    que las 32 features no introducen ruido que reduce IC.
-# 3. **Horizonte dinamico.** En vez de fijar 6 meses, explorar si el horizonte
-#    optimo varia con el regimen de mercado (volatilidad alta → horizonte
-#    corto, mercado estable → horizonte largo).
+# De manera personal, reflexionando sobre el proceso, las areas donde invertiria
+# mas esfuerzo son cuatro. Primero, dedicar mas tiempo a la **validacion del
+# universo** — entender cuantos fondos realmente "murieron" vs simplemente dejaron
+# de reportar, porque esto afecta directamente la calibracion del backtest.
+# Segundo, explorar **feature selection formal**: aunque el ElasticNet hace
+# seleccion implicita via L1, probar Boruta o seleccion secuencial ayudaria a
+# confirmar que las 32 features no introducen ruido que reduce IC. Tercero,
+# investigar un **horizonte dinamico** — en vez de fijar 6 meses, explorar si el
+# horizonte optimo varia con el regimen de mercado (volatilidad alta → horizonte
+# corto, mercado estable → horizonte largo). Y cuarto, **conectar directamente a
+# la API de Bloomberg** (`blpapi` via Python) para extraer datos con la mayor
+# granularidad disponible por fondo: retornos diarios ajustados, AUM historico,
+# flujos netos, expense ratios oficiales, clasificacion por estilo (growth/value,
+# large/small/mid cap), benchmark declarado y composicion completa del portafolio.
+# Con estos campos el modelo podria incorporar features de capacidad,
+# estilo relativo al benchmark, y validar las variables de concentracion
+# contra datos oficiales — eliminando las limitaciones de imputacion y anonimizacion
+# del dataset actual.
 #
 # ### Uso de IA (LLMs) en el proceso
 #
@@ -1362,7 +1384,6 @@ fig.tight_layout()
 # - **Esquema de validacion:** se inspeccionaron manualmente los folds
 #   resultantes (fechas de train/embargo/val) en `fold_diagnostics.csv`,
 #   confirmando que `val_start - train_end >= embargo` en todos los folds.
-# - **Argumentos metodologicos:** se contrastaron contra las fuentes
-#   primarias citadas (Carhart 1997 para momentum + fee, Sortino & Price
-#   1994 para la definicion del ratio, Lopez de Prado para anti-leakage,
-#   DeMiguel et al. 2009 para el benchmark 1/N).
+# - **Argumentos metodologicos:** se contrastaron contra la literatura
+#   relevante (momentum + fee como predictores, definicion del Sortino ratio,
+#   disciplina de anti-leakage en datos temporales, benchmark 1/N).

@@ -29,7 +29,7 @@ if [ -d "fund-scoring" ]; then
     cd fund-scoring
     git pull origin master
 else
-    git clone https://github.com/Mentalistdg/Bloomberg.git fund-scoring
+    git clone https://github.com/<your-user>/<your-repo>.git fund-scoring
     cd fund-scoring
 fi
 
@@ -60,14 +60,11 @@ echo "=============================="
 sleep 5
 echo "--- Health check scoring (8080) ---"
 curl -s http://localhost:8080/api/health && echo ""
-echo "--- Cronnos sigue en :80 ---"
-curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:80 && echo ""
 
 echo ""
 echo "=============================="
 echo "DEPLOY COMPLETO"
 echo "=============================="
 echo "Scoring dashboard: http://localhost:8080"
-echo "Cronnos (sin tocar): http://localhost:80"
 echo ""
 echo "Siguiente paso: instalar Cloudflare Tunnel (ver deploy_cloudflare.sh)"

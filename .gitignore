@@ -43,3 +43,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Archivos temporales de diseño / descargas
+design_bundle/
+design_*.html
+*.xlsx
+
+# PDFs de presentación (no entregar con código)
+Scoring*.pdf

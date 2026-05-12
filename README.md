@@ -21,7 +21,7 @@ IC del modelo, sino la robustez del proceso.
 
 ## Reproducibilidad end-to-end
 
-```powershell
+```bash
 # 1. crear venv y deps (uv)
 uv sync
 
@@ -97,10 +97,10 @@ a todos los scripts que la usen, sin duplicar código.
 ├── src/                              módulos reutilizables (se importan, no se ejecutan)
 │   ├── paths.py                      rutas centralizadas del proyecto
 │   ├── data.py                       carga de sqlite, retorno total diario, panel mensual
-│   ├── features.py                   ingeniería de features (31 cols) + targets forward (4 lentes)
-│   ├── splits.py                     walk-forward expanding window con embargo = horizonte
+│   ├── features.py                   ingeniería de features (32 cols) + targets forward (4 lentes)
+│   ├── splits.py                     walk-forward rolling window (max 120m) con embargo = horizonte
 │   ├── model.py                      ElasticNet, LightGBM, benchmark naive
-│   ├── metrics.py                    IC, spread Q5-Q1, hit rate, multi-lens, persistencia rank
+│   ├── metrics.py                    IC, spread D10-D1, hit rate, multi-lens, persistencia rank
 │   └── validation.py                 bootstrap CI del IC, test de Diebold-Mariano
 │
 ├── scripts/                          orquestación: se ejecutan en orden 01 → 05
@@ -205,9 +205,9 @@ Tradeoff explícito: priorizamos defensibilidad sobre máxima performance OOS.
 
 ## Validación
 
-- **Walk-forward expanding window**: mínimo 60 meses de training, 12 meses
-  de validación, **embargo igual al horizonte del target** (6m) para evitar
-  leakage del forward.
+- **Walk-forward rolling window** (max 120 meses): mínimo 60 meses de training,
+  12 meses de validación, **embargo igual al horizonte del target** (6m) para
+  evitar leakage del forward.
 - **Bootstrap CI**: 5,000 iteraciones sobre la serie mensual de IC.
 - **Diebold-Mariano**: test de superioridad predictiva con corrección
   Newey-West por autocorrelación. ElasticNet vs benchmark naive.
@@ -232,7 +232,7 @@ Los resultados numéricos se actualizan al re-ejecutar el pipeline con
 en `artifacts/metrics.json` y en el dashboard (pestaña Backtest).
 
 **Lectura:** el ElasticNet entrenado con target Sortino forward gana
-en métricas risk-adjusted (Sharpe y Sortino Q5-Q1) y reduce drawdowns
+en métricas risk-adjusted (Sharpe y Sortino D10-D1) y reduce drawdowns
 realizados, pero puede perder en retorno bruto — comportamiento esperado
 y consistente con el target elegido. Una AFP que selecciona fondos para
 sostener a afiliados a largo plazo prefiere fondos de mejor calidad
@@ -340,12 +340,12 @@ contra alternativas y el porqué de la elección.
 
 | Alternativa | Por qué se descartó |
 |---|---|
-| AxiomaticScorer (benchmark teórico con pesos fijos) | Combinación lineal de ranks con pesos teóricos. Simplificado del pipeline final para reducir complejidad de presentación — queda pareado con ElasticNet en IC, no aporta valor diferenciador claro respecto al benchmark naive. |
+| AxiomaticScorer (benchmark teórico con pesos fijos) | Combinación lineal de ranks con pesos teóricos. Removido del pipeline final — queda pareado con ElasticNet en IC, no aporta valor diferenciador claro respecto al benchmark naive (`ret_12m_rank − fee_rank`). |
 | Clasificación binaria (top-quintil vs resto) | Pierde información ordinal del ranking; menos eficiente que regresión sobre el rank cross-seccional. |
 | RandomForest / XGBoost / RNN | Riesgo alto de overfitting con ~50K obs y ~30 features; menor interpretabilidad. LightGBM cubre la sanity check no-lineal. |
 | Predecir retorno a 1 mes (`shift(-1)`) | A 1m el retorno es ~99% beta de mercado, casi cero alfa de fondo. Horizonte equivocado para selección de fondos en una AFP. |
 | Frecuencia diaria del modelado | Las observaciones diarias están muy autocorrelacionadas; más filas no implica más información. Métricas de fondos (Sharpe, drawdown) son intrínsecamente multi-período. |
-| Composite axiomático multi-target en entrenamiento | Forzaría definir pesos del composite a priori; agrega subjetividad sin claro beneficio. Lo manejamos como AxiomaticScorer (sin entrenar) en paralelo. |
+| Composite axiomático multi-target en entrenamiento | Forzaría definir pesos del composite a priori; agrega subjetividad sin claro beneficio. |
 | Indicadores AT clásicos (RSI, MACD, Bollinger) | Diseñados para timing de instrumentos individuales en horizontes cortos; no calzan con selección de fondos. Sí mantenemos features tipo "estilísticas de la distribución de retornos del fondo": skewness, hit-rate, persistencia rank. |
 
 ## Uso de IA / LLMs (entregable #5)
@@ -355,4 +355,4 @@ se usó para discutir metodología iterativamente, hacer code review de
 las decisiones de imputación y target, y generar drafts de docstrings.
 Cada decisión fue validada con consultas reales al dataset (no se
 implementó nada "porque el LLM lo dijo"). Commits firmados con
-`Co-Authored-By: Claude Opus 4.7`.
+`Co-Authored-By: Claude Opus 4.6`.

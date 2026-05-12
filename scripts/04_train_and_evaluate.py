@@ -131,8 +131,8 @@ def evaluate_signal(scores: pd.DataFrame, score_col: str) -> dict:
     ic = ic_per_date(scores, score_col, "target_rank")
     summary = ic_summary(ic)
     boot = bootstrap_mean_ci(ic)
-    decile_spread = quintile_spread_per_date(scores, score_col, "target_sortino", n_q=10)
-    hit = hit_rate_top_quartile(scores, score_col, "target_sortino")
+    decile_spread = quintile_spread_per_date(scores, score_col, "target_rank", n_q=10)
+    hit = hit_rate_top_quartile(scores, score_col, "target_rank")
     return {
         "ic_summary": summary,
         "ic_bootstrap": boot,
@@ -156,15 +156,15 @@ def plot_diagnostics(scores: pd.DataFrame, ic_series: pd.Series,
     axes[0].set_ylabel("Spearman corr")
     axes[0].legend()
 
-    decile = quintile_spread_per_date(scores, f"score_{label}", "target_sortino", n_q=10)
+    decile = quintile_spread_per_date(scores, f"score_{label}", "target_rank", n_q=10)
     if len(decile):
         cols = [c for c in decile.columns if c.startswith("q")]
         means = decile[cols].mean()
         axes[1].bar(range(len(means)), means.values, color="#2e7d32")
         axes[1].set_xticks(range(len(means)))
         axes[1].set_xticklabels(cols)
-        axes[1].set_ylabel("Sortino realizado promedio")
-        axes[1].set_title(f"Sortino por decil ({label}{suffix})")
+        axes[1].set_ylabel("Target rank promedio")
+        axes[1].set_title(f"Target rank por decil ({label}{suffix})")
         axes[1].axhline(0, color="black", lw=0.5)
 
     fig.tight_layout()
@@ -256,6 +256,20 @@ def main() -> None:
     results["diebold_mariano_elastic_vs_benchmark"] = dm
 
     # --- Validacion multi-lente ---
+    # Para el IC (Spearman, basado en rangos), target_sortino crudo funciona
+    # bien. Para D10-D1 spread (basado en mean), valores extremos de Sortino
+    # finitos (~1e3-1e10 cuando downside_dev ≈ 0) distorsionan el promedio.
+    # Solucion: evaluar multi-lente con una columna Sortino limpia —
+    # guardamos la original para IC y usamos una version clippeada para spread.
+    if "target_sortino" in scores.columns:
+        scores["target_sortino"] = scores["target_sortino"].replace(
+            [np.inf, -np.inf], np.nan
+        )
+        # Clip global p2.5/p97.5: Sortino anualizado > ~20 o < ~-20 es espurio
+        p025 = scores["target_sortino"].quantile(0.025)
+        p975 = scores["target_sortino"].quantile(0.975)
+        scores["target_sortino"] = scores["target_sortino"].clip(p025, p975)
+
     multi_lens_targets = [c for c in
                           ["target_ret", "target_sharpe", "target_sortino", "target_max_dd"]
                           if c in scores.columns]
@@ -268,7 +282,7 @@ def main() -> None:
         multi_lens[label]["_rank_persistence_lag_h"] = pers
     results["multi_lens"] = multi_lens
 
-    print("    --- Multi-lens (Q5-Q1 spread medio sobre target realizado):")
+    print("    --- Multi-lens (D10-D1 spread medio sobre target realizado):")
     for label in ["elastic", "lgbm", "benchmark"]:
         parts = []
         for tcol in multi_lens_targets:

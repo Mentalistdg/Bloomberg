@@ -1,13 +1,17 @@
 #!/bin/bash
 # =============================================================
-# Cloudflare Tunnel setup — scoring.davidgonzalez.cl + cronnos.davidgonzalez.cl
+# Cloudflare Tunnel setup — scoring.<your-domain>
 # Ejecutar DESPUÉS de deploy_ec2.sh
 #
 # IMPORTANTE: Este script es interactivo en un paso —
 # cloudflared login abrirá una URL que debes pegar en tu browser
 # para autorizar la cuenta de Cloudflare.
+#
+# Antes de ejecutar, reemplaza <your-domain> por tu dominio real.
 # =============================================================
 set -euo pipefail
+
+DOMAIN="${DOMAIN:-<your-domain>}"
 
 echo "=============================="
 echo "PASO 1: Instalar cloudflared"
@@ -21,7 +25,7 @@ echo "=============================="
 echo "PASO 2: Login en Cloudflare"
 echo "=============================="
 echo ">>> Se abrirá una URL. Cópiala y pégala en tu browser para autorizar."
-echo ">>> Selecciona la zona 'davidgonzalez.cl'."
+echo ">>> Selecciona la zona '${DOMAIN}'."
 echo ""
 cloudflared tunnel login
 
@@ -29,10 +33,10 @@ echo ""
 echo "=============================="
 echo "PASO 3: Crear tunnel"
 echo "=============================="
-cloudflared tunnel create davidgonzalez
+cloudflared tunnel create scoring
 
 # Obtener el TUNNEL_ID del output
-TUNNEL_ID=$(cloudflared tunnel list | grep davidgonzalez | awk '{print $1}')
+TUNNEL_ID=$(cloudflared tunnel list | grep scoring | awk '{print $1}')
 echo "Tunnel ID: $TUNNEL_ID"
 
 echo ""
@@ -45,12 +49,8 @@ tunnel: ${TUNNEL_ID}
 credentials-file: /home/ubuntu/.cloudflared/${TUNNEL_ID}.json
 
 ingress:
-  - hostname: scoring.davidgonzalez.cl
+  - hostname: scoring.${DOMAIN}
     service: http://localhost:8080
-  - hostname: cronnos.davidgonzalez.cl
-    service: http://localhost:80
-  - hostname: davidgonzalez.cl
-    service: http://localhost:80
   - service: http_status:404
 HEREDOC
 
@@ -61,9 +61,7 @@ echo ""
 echo "=============================="
 echo "PASO 5: Registrar DNS en Cloudflare"
 echo "=============================="
-cloudflared tunnel route dns davidgonzalez scoring.davidgonzalez.cl
-cloudflared tunnel route dns davidgonzalez cronnos.davidgonzalez.cl
-cloudflared tunnel route dns davidgonzalez davidgonzalez.cl
+cloudflared tunnel route dns scoring scoring.${DOMAIN}
 
 echo ""
 echo "=============================="
@@ -78,10 +76,8 @@ echo "=============================="
 echo "TUNNEL CONFIGURADO"
 echo "=============================="
 echo ""
-echo "URLs finales (una vez que SSL esté en modo Full en Cloudflare dashboard):"
-echo "  https://scoring.davidgonzalez.cl   → Dashboard scoring fondos"
-echo "  https://cronnos.davidgonzalez.cl   → Dashboard tesis Cronnos"
-echo "  https://davidgonzalez.cl           → Landing (Cronnos por ahora)"
+echo "URL final (una vez que SSL esté en modo Full en Cloudflare dashboard):"
+echo "  https://scoring.${DOMAIN}   → Dashboard scoring fondos"
 echo ""
 echo "PASO MANUAL RESTANTE:"
 echo "  Cloudflare Dashboard → SSL/TLS → modo 'Full'"

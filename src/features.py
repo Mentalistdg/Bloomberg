@@ -1,7 +1,7 @@
 """Ingeniería de features sobre el panel mensual.
 
 Este módulo transforma el panel mensual crudo (output de data.py) en un
-dataset listo para modelar, con 23 features y targets forward multi-horizonte.
+dataset listo para modelar, con 32 features y targets forward multi-horizonte.
 Es el núcleo de la preparación de datos del pipeline.
 
 Convención anti-leakage (CRÍTICA):
@@ -18,27 +18,36 @@ Convención sobre fees y NAV:
     feature explicativa (un fondo con fee alto necesita generar más
     retorno bruto para compensar).
 
-Las 23 features se dividen en tres grupos:
+Las 32 features se dividen en tres grupos:
 
-    CORE (10):     Derivadas del retorno + intra-mes (densas tras 12m warmup).
+    CORE (14):     Derivadas del retorno + intra-mes (densas tras 12m warmup).
                    ret_1m, ret_3m, ret_6m, ret_12m, vol_12m, max_dd_12m,
-                   sharpe_12m, vol_intrames, autocorr_diaria, ratio_dias_cero.
+                   sharpe_12m, vol_intrames, autocorr_diaria, ratio_dias_cero,
+                   skewness_12m, hit_rate_12m, distribution_yield_12m,
+                   persistencia_rank_12m.
                    Se exige no-NaN para que una observación sea modelable.
 
-    EXTENDED (4):  fee, log_n_instrumentos + 2 flags binarias.
+    EXTENDED (5):  fee, log_n_instrumentos, pct_acum + 2 flags binarias.
                    - fee: cobertura ~98% post ffill+bfill intra-fondo
                      (el dataset solo reporta fees desde 2024-01-31, pero
                      el fee es estructuralmente estable en mutual funds USA,
                      por lo que se imputa hacia atrás dentro de cada fondo).
                      Flag `fee_observado` (set en data.py) marca si el valor
                      del mes específico era original (1) o imputado (0).
-                   - log_n_instrumentos: cobertura limitada, imputado con
-                     mediana cross-seccional + flag `concentracion_disponible`.
+                   - log_n_instrumentos, pct_acum: concentración del portafolio.
+                     Cobertura limitada, imputado con mediana cross-seccional
+                     + flag `concentracion_disponible`.
 
-    RANK (9):      Percentil cross-seccional dentro del mes para: ret_3m,
-                   ret_12m, vol_12m, sharpe_12m, fee, log_n_instrumentos,
-                   vol_intrames, autocorr_diaria, ratio_dias_cero.
+    RANK (13):     Percentil cross-seccional dentro del mes para: ret_3m,
+                   ret_12m, vol_12m, sharpe_12m, max_dd_12m, fee,
+                   log_n_instrumentos, pct_acum, vol_intrames,
+                   autocorr_diaria, ratio_dias_cero, skewness_12m,
+                   hit_rate_12m.
                    Aportan robustez ante cambios de escala entre períodos.
+
+Nota: sortino_12m se computa en add_risk_features() como métrica de
+display (aparece en el dashboard), pero NO entra como feature del modelo
+(no está en FEATURE_COLS).
 
 Usado por: scripts/03_build_features_full.py
 """
@@ -221,7 +230,7 @@ def add_target(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
             Retorno total compuesto a `horizon` meses y su percentil
             dentro del mes T. Métrica naive — captura ganancia bruta sin
             ajustar por riesgo. Se mantiene para reportar resultados en
-            términos interpretables (Q5-Q1 spread en %).
+            términos interpretables (D10-D1 spread en %).
       - target_sharpe_{h}m / target_sharpe_rank_{h}m:
             Sharpe ratio anualizado a `horizon` meses
             ((mean / std) * sqrt(12)) y su percentil dentro del mes T.
