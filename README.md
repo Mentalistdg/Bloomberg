@@ -11,35 +11,55 @@ IC del modelo, sino la robustez del proceso.
 
 ## Entregables
 
-| Deliverable | Ubicación |
-|---|---|
-| Notebook reproducible | [`notebooks/informe.ipynb`](notebooks/informe.ipynb) |
-| Informe narrativo | [`docs/INFORME.md`](docs/INFORME.md) |
-| Outline de slides (10 láminas) | [`docs/slides_outline.md`](docs/slides_outline.md) |
-| Pipeline de código | `src/` + `scripts/` |
-| Dashboard | `app/backend` (FastAPI) + `app/frontend` (React) |
+| # | Entregable | Ubicación | Descripción |
+|---|---|---|---|
+| 1 | **Notebook con resultados** | [`notebooks/informe.ipynb`](notebooks/informe.ipynb) | Análisis completo: EDA, features, walk-forward, métricas OOS, bootstrap, Diebold-Mariano. Visible directamente en GitHub. |
+| 2 | **Informe narrativo** | [`docs/INFORME.md`](docs/INFORME.md) | Documento con metodología, supuestos, resultados y reflexión crítica. |
+| 3 | **Pipeline de código** | `src/` + `scripts/` | Código modular y reproducible (5 scripts secuenciales). |
+| 4 | **Dashboard interactivo** | [scoring.davidgonzalez.cl](https://scoring.davidgonzalez.cl) | App web con ranking de fondos, backtest, drivers y portfolio. Código en `app/`. |
+| 5 | **Presentación** | Adjunta al correo | 10 láminas. Outline en [`docs/slides_outline.md`](docs/slides_outline.md). |
 
-## Reproducibilidad end-to-end
+## Quick start
+
+Requisito: [uv](https://docs.astral.sh/uv/getting-started/installation/) (gestor de dependencias Python).
 
 ```bash
-# 1. crear venv y deps (uv)
+# Clonar el repositorio (incluye datos y resultados pre-computados)
+git clone https://github.com/Mentalistdg/Bloomberg.git
+cd Bloomberg
+
+# Instalar dependencias
 uv sync
 
-# 2. correr el pipeline completo (5 pasos secuenciales)
+# Correr el pipeline completo (5 pasos secuenciales, ~5 min)
 uv run python -m scripts.run_all
 
-# o paso a paso:
-uv run python -m scripts.01_build_features        # panel mensual base
-uv run python -m scripts.02_eda_report            # plots de validación
-uv run python -m scripts.03_build_features_full   # features + target
-uv run python -m scripts.04_train_and_evaluate    # walk-forward + métricas
-uv run python -m scripts.05_build_app_data        # JSONs para el dashboard
-
-# 3. notebook (auto-renderiza con jupytext desde notebooks/informe.py)
+# Abrir el notebook con resultados
 uv run jupyter notebook notebooks/informe.ipynb
+```
 
-# 4. dashboard local
+**Sin correr nada**, los resultados ya están disponibles:
+- El notebook [`notebooks/informe.ipynb`](notebooks/informe.ipynb) se renderiza directamente en GitHub con todos los outputs.
+- Los artefactos (scores, métricas, plots) están en `artifacts/`.
+- El dashboard está desplegado en [scoring.davidgonzalez.cl](https://scoring.davidgonzalez.cl).
+
+### Pipeline paso a paso (opcional)
+
+```bash
+uv run python -m scripts.01_build_features        # sqlite → panel mensual base
+uv run python -m scripts.02_eda_report            # panel_raw → plots de validación
+uv run python -m scripts.03_build_features_full   # panel_raw → 32 features + target
+uv run python -m scripts.04_train_and_evaluate    # walk-forward → scores, métricas, drivers
+uv run python -m scripts.05_build_app_data        # scores → JSONs para el dashboard
+```
+
+### Dashboard local (opcional)
+
+```bash
+# Terminal 1 — backend
 uv run uvicorn app.backend.main:app --reload --port 8000
+
+# Terminal 2 — frontend
 npm --prefix app/frontend install
 npm --prefix app/frontend run dev    # http://localhost:3000
 ```
@@ -90,8 +110,8 @@ a todos los scripts que la usen, sin duplicar código.
 
 ```
 .
-├── assets/                           datos fuente (no versionados en git)
-│   └── usa_fondos_pp.sqlite          base sqlite con historico, fees, subyacentes
+├── assets/                           datos fuente
+│   └── usa_fondos_pp.sqlite          base sqlite con historico, fees, subyacentes (~80 MB)
 │
 ├── src/                              módulos reutilizables (se importan, no se ejecutan)
 │   ├── paths.py                      rutas centralizadas del proyecto
